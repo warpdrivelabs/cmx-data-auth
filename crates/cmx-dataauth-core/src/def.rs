@@ -14,6 +14,18 @@ pub enum Effect {
     Deny,
 }
 
+/// 策略约束来源（D3）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicySource {
+    /// 内联：`constraint_tpl` 直接是 Constraint AST 模板（默认，D0-D2/D5）。
+    #[default]
+    Inline,
+    /// 决策表：`constraint_tpl` 是 cmx-rulesengine 的 DecisionBody JSON；求值输出列 `constraint`
+    /// 产出 Constraint（可含 `$dim:*`/`$user` 占位），再走同一 subst 管道。
+    DecisionTable,
+}
+
 /// 策略定义（落 `cmx_dataauth_policy`）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,8 +36,13 @@ pub struct PolicyDef {
     pub resource_kind: String,
     #[serde(default)]
     pub action: Action,
-    /// 约束 AST **模板**（`Constraint` 的 JSON；可含维度占位 `{"kind":"in","field":"ou_id","values":["$dim:org"]}`
-    /// 与标量占位 `"$user"`）。落 `constraint_json`。
+    /// 约束来源。`inline`（默认）→ `constraint_tpl` 为 Constraint AST；`decisionTable` →
+    /// `constraint_tpl` 为决策表 DecisionBody JSON（app 层求值成 Constraint）。
+    #[serde(default)]
+    pub source: PolicySource,
+    /// `source=inline`：约束 AST **模板**（`Constraint` 的 JSON；可含维度占位
+    /// `{"kind":"in","field":"ou_id","values":["$dim:org"]}` 与标量占位 `"$user"`）。
+    /// `source=decisionTable`：决策表 DecisionBody JSON。均落 `constraint_json` 列。
     pub constraint_tpl: Value,
     #[serde(default)]
     pub priority: i32,

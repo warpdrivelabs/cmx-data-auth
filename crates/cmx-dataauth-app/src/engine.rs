@@ -5,7 +5,7 @@
 
 use chrono::Utc;
 use cmx_dataauth_core::{
-    compose, Constraint, ConstraintCompiler, DataAuthStore, Decision, DecisionEffect,
+    apply_masks, compose, Constraint, ConstraintCompiler, DataAuthStore, Decision, DecisionEffect,
     DimensionExpander, EsCompiler, ExpandedDims, Obligation, PolicyDef, Resource,
     RowFilterCompiler, SqlCompiler, Subject,
 };
@@ -52,6 +52,11 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
         .load_policies(&tenant, &resource.kind, resource.action.as_str())
         .await
         .map_err(|e| AuthzError::internal(format!("装载策略失败: {e}")))?;
+    // D3：决策表源策略 → 求值降解为内联 Constraint 模板（core::pdp 无感）。
+    let policies: Vec<PolicyDef> = policies
+        .iter()
+        .map(|p| crate::policy_source::resolve_policy(p, subject))
+        .collect();
 
     // ② 装命中主体（USER + 每个 ROLE）的授权。
     let mut subjects = vec![("USER".to_string(), subject.user_id.clone())];
@@ -244,4 +249,26 @@ pub fn compile(decision: &Decision, resource: &Resource, backend: &str) -> Resul
         }
         other => Err(AuthzError::business(format!("未知编译后端: {other}"))),
     }
+}
+
+/// 在内存里对调用方给的行集**就地执行**数据权限：同一约束 AST 编译成谓词过滤行 + 义务脱敏列。
+///
+/// 这是 archetype-③（拉取后过滤）的完整闭环，**全程不碰数据库** —— 证明"同一决策多点执行"：
+/// 同一 `Decision.constraint` 既可 [`compile`] 成 SQL 下推，也可在此处过滤内存 DataSet / CSV / 跨库结果。
+///
+/// 返回 `(kept, filtered_count)`：保留并脱敏后的行 + 被过滤掉的行数。
+pub fn enforce(
+    decision: &Decision,
+    rows: Vec<serde_json::Map<String, Value>>,
+) -> Result<(Vec<serde_json::Map<String, Value>>, usize), AuthzError> {
+    let total = rows.len();
+    // Deny → 全部过滤（约束为 False，谓词恒假）。
+    let pred = RowFilterCompiler
+        .compile(&decision.constraint)
+        .map_err(|e| AuthzError::business(format!("内存谓词编译失败: {e}")))?;
+    let mut kept: Vec<serde_json::Map<String, Value>> =
+        rows.into_iter().filter(|r| pred(r)).collect();
+    let filtered = total - kept.len();
+    apply_masks(&mut kept, &decision.obligations);
+    Ok((kept, filtered))
 }

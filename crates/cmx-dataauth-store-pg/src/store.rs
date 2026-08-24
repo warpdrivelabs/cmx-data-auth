@@ -11,7 +11,7 @@ use cmx_core::model::data::dataset::{DataSet, Row, Schema};
 use cmx_database_pg::{execute_sql, execute_sql_with_params, query_sql_with_params, SqlParams};
 use cmx_dataauth_core::{
     AuditLog, DataAuthStore, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef,
-    RelationTuple, StoreError, StoreResult,
+    PolicySource, RelationTuple, StoreError, StoreResult,
 };
 use serde_json::Value;
 
@@ -66,7 +66,7 @@ impl DataAuthStore for PgDataAuthStore {
     async fn list_policies(&self, _tenant: &str) -> StoreResult<Vec<PolicyDef>> {
         let ds = self
             .query(
-                "SELECT id, name, resource_kind, action, constraint_json, priority, effect \
+                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
                  FROM cmx_dataauth_policy ORDER BY priority DESC, id",
                 vec![],
                 "dataauth_policy_list",
@@ -78,7 +78,7 @@ impl DataAuthStore for PgDataAuthStore {
     async fn get_policy(&self, _tenant: &str, id: i64) -> StoreResult<Option<PolicyDef>> {
         let ds = self
             .query(
-                "SELECT id, name, resource_kind, action, constraint_json, priority, effect \
+                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
                  FROM cmx_dataauth_policy WHERE id = $1",
                 vec![DataValue::Int(id)],
                 "dataauth_policy_one",
@@ -95,7 +95,7 @@ impl DataAuthStore for PgDataAuthStore {
     ) -> StoreResult<Vec<PolicyDef>> {
         let ds = self
             .query(
-                "SELECT id, name, resource_kind, action, constraint_json, priority, effect \
+                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
                  FROM cmx_dataauth_policy \
                  WHERE enabled = TRUE AND resource_kind = $1 AND action = $2 \
                  ORDER BY priority DESC, id",
@@ -113,15 +113,17 @@ impl DataAuthStore for PgDataAuthStore {
         let now = Utc::now();
         let cj = DataValue::Json(p.constraint_tpl.to_string());
         let eff = effect_str(p.effect);
+        let src = source_str(p.source);
         if p.id == 0 {
             self.insert_returning_id(
                 "INSERT INTO cmx_dataauth_policy \
-                 (name, resource_kind, action, constraint_json, priority, effect, enabled, created_at, updated_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,TRUE,$7,$7) RETURNING id",
+                 (name, resource_kind, action, source, constraint_json, priority, effect, enabled, created_at, updated_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$8) RETURNING id",
                 vec![
                     DataValue::String(p.name.clone()),
                     DataValue::String(p.resource_kind.clone()),
                     DataValue::String(p.action.as_str().to_string()),
+                    DataValue::String(src),
                     cj,
                     DataValue::Int(p.priority as i64),
                     DataValue::String(eff),
@@ -131,13 +133,14 @@ impl DataAuthStore for PgDataAuthStore {
             .await
         } else {
             self.exec(
-                "UPDATE cmx_dataauth_policy SET name=$2, resource_kind=$3, action=$4, \
-                 constraint_json=$5, priority=$6, effect=$7, updated_at=$8 WHERE id=$1",
+                "UPDATE cmx_dataauth_policy SET name=$2, resource_kind=$3, action=$4, source=$5, \
+                 constraint_json=$6, priority=$7, effect=$8, updated_at=$9 WHERE id=$1",
                 vec![
                     DataValue::Int(p.id),
                     DataValue::String(p.name.clone()),
                     DataValue::String(p.resource_kind.clone()),
                     DataValue::String(p.action.as_str().to_string()),
+                    DataValue::String(src),
                     cj,
                     DataValue::Int(p.priority as i64),
                     DataValue::String(eff),
@@ -498,6 +501,7 @@ fn rows_to_policies(ds: &DataSet) -> StoreResult<Vec<PolicyDef>> {
             name: get_opt_string(r, schema, "name").unwrap_or_default(),
             resource_kind: get_string(r, schema, "resource_kind")?,
             action: parse_action(&get_opt_string(r, schema, "action").unwrap_or_default()),
+            source: parse_source(&get_opt_string(r, schema, "source").unwrap_or_default()),
             constraint_tpl: get_json(r, schema, "constraint_json")?,
             priority: get_i64(r, schema, "priority") as i32,
             effect: parse_effect(&get_opt_string(r, schema, "effect").unwrap_or_default()),
@@ -573,6 +577,22 @@ fn parse_effect(s: &str) -> Effect {
         Effect::Deny
     } else {
         Effect::Permit
+    }
+}
+
+fn source_str(s: PolicySource) -> String {
+    match s {
+        PolicySource::Inline => "inline",
+        PolicySource::DecisionTable => "decisionTable",
+    }
+    .to_string()
+}
+
+fn parse_source(s: &str) -> PolicySource {
+    if s.eq_ignore_ascii_case("decisiontable") {
+        PolicySource::DecisionTable
+    } else {
+        PolicySource::Inline
     }
 }
 

@@ -12,6 +12,7 @@ pub const DDL_STATEMENTS: &[&str] = &[
         name            VARCHAR(256) NOT NULL DEFAULT '',
         resource_kind   VARCHAR(128) NOT NULL,
         action          VARCHAR(32)  NOT NULL DEFAULT 'read',
+        source          VARCHAR(32)  NOT NULL DEFAULT 'inline',
         constraint_json JSONB        NOT NULL,
         priority        INTEGER      NOT NULL DEFAULT 0,
         effect          VARCHAR(16)  NOT NULL DEFAULT 'permit',
@@ -19,6 +20,8 @@ pub const DDL_STATEMENTS: &[&str] = &[
         created_at      TIMESTAMPTZ  NOT NULL,
         updated_at      TIMESTAMPTZ  NOT NULL
     )"#,
+    // 补列（老库平滑升级）。
+    "ALTER TABLE cmx_dataauth_policy ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL DEFAULT 'inline'",
     "CREATE INDEX IF NOT EXISTS idx_cmx_dataauth_policy_lookup ON cmx_dataauth_policy (resource_kind, action)",
     // —— 授权：策略 ↔ 主体 + 维度值集 ——
     r#"CREATE TABLE IF NOT EXISTS cmx_dataauth_grant (

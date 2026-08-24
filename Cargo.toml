@@ -34,8 +34,10 @@ cmx-web-chassis = { path = "../cmx-container/crates/libs/cmx-web-chassis", versi
 cmx-web-monitor = { path = "../cmx-container/crates/libs/cmx-web-monitor", version = "0.1.12" }
 cmx-service-base = { path = "../cmx-container/crates/libs/cmx-service-base", version = "0.1.12", default-features = false }
 
-# —— 复用 cmx-rulesengine 的 FEEL 引擎（评脱敏 condition_expr，如 user.grade < 5）——
+# —— 复用 cmx-rulesengine 的 FEEL 引擎 + 决策表内核（D3：决策表作策略源）——
 cmx-rule-feel = { path = "../cmx-rulesengine/crates/cmx-rule-feel", version = "0.1.0" }
+cmx-rule-model = { path = "../cmx-rulesengine/crates/cmx-rule-model", version = "0.1.0" }
+cmx-rule-engine = { path = "../cmx-rulesengine/crates/cmx-rule-engine", version = "0.1.0" }
 
 # —— 外部 crate（版本照抄 cmx-container 根 [workspace.dependencies]，与 rule/flow 对齐）——
 serde = { version = "1.0", features = ["derive"] }

@@ -18,6 +18,7 @@ pub mod error;
 pub mod eval;
 pub mod expand;
 pub mod ir;
+pub mod mask;
 pub mod pdp;
 pub mod store;
 pub mod subject;
@@ -26,7 +27,8 @@ pub use compiler::{
     ConstraintCompiler, EsCompiler, RowFilterCompiler, RowPredicate, SqlCompiler, SqlWhere,
 };
 pub use def::{
-    AuditLog, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef, RelationTuple,
+    AuditLog, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef, PolicySource,
+    RelationTuple,
 };
 pub use error::{
     CompileError, CompileResult, Error, ExpandError, ExpandResult, Result, StoreError, StoreResult,
@@ -34,6 +36,7 @@ pub use error::{
 pub use eval::{Decision, DecisionEffect, Obligation, Trace};
 pub use expand::{DimensionExpander, MockDimensionExpander, NoopExpander};
 pub use ir::{CmpOp, Constraint};
+pub use mask::{apply_masks, mask_value};
 pub use pdp::{compose, ExpandedDims, SUPERADMIN_ROLES};
 pub use store::DataAuthStore;
 pub use subject::{Action, Resource, Subject};
@@ -333,6 +336,7 @@ mod tests {
             name: "org-scope".into(),
             resource_kind: "voucher".into(),
             action: Action::Read,
+            source: PolicySource::Inline,
             constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
             priority: 0,
             effect: Effect::Permit,
@@ -373,6 +377,7 @@ mod tests {
             name: "own".into(),
             resource_kind: "voucher".into(),
             action: Action::Read,
+            source: PolicySource::Inline,
             constraint_tpl: json!({"kind":"cmp","field":"owner","op":"eq","value":"$user"}),
             priority: 0,
             effect: Effect::Permit,
@@ -409,6 +414,7 @@ mod tests {
             name: "org-scope".into(),
             resource_kind: "voucher".into(),
             action: Action::Read,
+            source: PolicySource::Inline,
             constraint_tpl: json!({"kind":"and","items":[
                 {"kind":"in","field":"ou_id","values":["$dim:org"]},
                 {"kind":"cmp","field":"owner","op":"eq","value":"$user"}
@@ -442,6 +448,7 @@ mod tests {
             name: "blk".into(),
             resource_kind: "voucher".into(),
             action: Action::Read,
+            source: PolicySource::Inline,
             constraint_tpl: json!({"kind":"false"}),
             priority: 100,
             effect: Effect::Deny,

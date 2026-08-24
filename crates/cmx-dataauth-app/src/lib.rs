@@ -7,12 +7,15 @@ pub mod auth;
 pub mod dashboard;
 pub mod engine;
 pub mod handlers;
+pub mod pep;
+pub mod policy_source;
 pub mod resp;
 pub mod tenancy;
 pub mod tenant;
 
 pub use auth::auth as auth_middleware;
 pub use engine::{warm_store, DATAAUTH_DB_ID};
+pub use pep::{guard as pep_guard, DataScope, ResourceSpec};
 pub use resp::{ApiResp, AuthzError, Result};
 pub use tenant::{current_tenant, current_user, identity_snapshot};
 
@@ -40,9 +43,10 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
-        // —— 核心：决策 / 编译 ——
+        // —— 核心：决策 / 编译 / 就地执行 ——
         .route("/decide", post(handlers::decide))
         .route("/compile", post(handlers::compile))
+        .route("/enforce", post(handlers::enforce))
         // —— 策略 CRUD ——
         .route(
             "/policies",
@@ -89,4 +93,24 @@ where
         // —— 审计 / 大盘 ——
         .route("/audit-logs", get(handlers::list_audit))
         .route("/stats", get(handlers::stats))
+        // —— D6 演示：权限无感业务 handler（经 pep::guard 自动注入 DataScope）——
+        .merge(demo_guarded_routes::<S>())
+}
+
+/// D6 演示路由：`GET /demo/vouchers` 挂 PEP 守卫层（voucher/read，org→ou_id，owner/status 可过滤）。
+/// 业务 handler `demo_vouchers` 权限无感，只消费注入的 `DataScope`。
+fn demo_guarded_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    use cmx_dataauth_core::Action;
+    let spec = pep::ResourceSpec::new("voucher", Action::Read)
+        .dim("org", "ou_id")
+        .cols(&["owner", "status"]);
+    Router::new().route("/demo/vouchers", get(handlers::demo_vouchers)).layer(
+        axum::middleware::from_fn(move |req, next| {
+            let spec = spec.clone();
+            async move { pep::guard(spec, req, next).await }
+        }),
+    )
 }

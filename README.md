@@ -32,7 +32,10 @@ cmx-dataauth-server    独立可跑 bin（cmx-web-chassis 骨架，:8096）
 | D1+ | 多后端：RowFilterCompiler（内存谓词闭包）/ EsCompiler（bool/terms/range） | core `compiler.rs` |
 | D2 | 层级维度展开（`org=1001` → 全部子孙，`WITH RECURSIVE`） | store-pg `expander.rs` |
 | D4 | 列脱敏义务（FULL/PARTIAL/HASH），FEEL `condition_expr` 门 + 角色豁免门 | app `engine.rs` + cmx-rule-feel |
+| D4+ | **义务执行器**：内存行集过滤 + 列脱敏（archetype-③，全程不碰 DB） | core `mask.rs` + app `engine::enforce` |
 | D5 | 基础 ReBAC 关系元组（`Relation` → `lookup_resources` → `In`） | store-pg + app `engine.rs` |
+| D3 | **决策表作策略源**：`source=decisionTable` 的策略经 cmx-rulesengine 求值成内联 Constraint | app `policy_source.rs` |
+| D6 | **PEP 中间件自动注入**：业务 handler 权限无感，只声明 `DataScope`；Deny→403 短路 | app `pep.rs` |
 | — | 部分求值 PDP（超管短路 / Deny 短路 / 无授权 fail-closed / 空维度坍缩 False） | core `pdp.rs` |
 | — | db-per-tenant（task_local 租户 scope + 懒备库）+ 决策审计 | app `tenant.rs`/`tenancy.rs` |
 
@@ -59,8 +62,22 @@ DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=80
 
 - `POST /decide` — `{subject, resource}` → `Decision{effect, constraint, obligations, trace}`
 - `POST /compile` — `{subject, resource, backend}` → decide + 编译（`backend` ∈ `sql`|`es`|`rowfilter`）
-- CRUD：`/policies` `/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
+- `POST /enforce` — `{subject, resource, rows}` → decide + **内存过滤 rows + 列脱敏**（archetype-③，不碰 DB）
+- `GET /demo/vouchers` — **D6 演示**：权限无感业务 handler，经 `pep::guard` 自动注入 `DataScope`
+- CRUD：`/policies`（`source` ∈ `inline`|`decisionTable`）`/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
 - `/audit-logs` · `/stats` · 根 `/` 监控大盘 · `/_mon` 技术监控
+
+### D3 决策表作策略源
+
+`source=decisionTable` 的策略把 cmx-rulesengine 的 `DecisionBody` JSON 存进 `constraintTpl`；
+decide 前用主体事实（roles/dims/attrs）跑决策表，读输出列 `constraint`（Constraint 的 JSON）→ 降解为内联
+模板 → 走同一 subst/compose 管道。cmx-rulesengine 作**纯库**复用，core 保持零 rule 依赖。
+
+### D6 PEP 中间件自动注入
+
+给业务路由挂 `pep::guard(ResourceSpec)` 层，中间件读 task_local 主体 → decide + 编译 SQL → 把
+`DataScope{whereSql, params, obligations}` 注入请求扩展；**Deny → 403 短路**。业务 handler 只声明
+`Extension<DataScope>`（或 `pep::scope_from`），把 `where_sql`/`params` 拼进自己的查询——不 import 任何策略概念。
 
 ### decide → compile 示例
 
@@ -76,11 +93,11 @@ POST /compile { ..., backend:"sql" }
 ## 验证状态
 
 - `cargo build --workspace` ✓（403 crates，离线 aliyun 镜像）
-- `cargo test --workspace` ✓ 30 单测
+- `cargo test --workspace` ✓ 39 单测（1 ignored = pep.rs 文档示例）
 - `cargo clippy --workspace` ✓ 0 警告
-- 真机启动 + `dataauth.sh` 端到端 ✓ 8/8（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC）
+- 真机启动 + `dataauth.sh` 端到端 ✓ 13/13（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC / enforce 内存过滤+脱敏 / D3 决策表源 / D6 PEP 注入）
 
-## 非目标（M1 之后）
+## 非目标（后续）
 
-D3 复用 cmx-rulesengine 决策表作策略源 · D6 ES 实时后端 + PG RLS DDL 生成 + chassis PEP 中间件自动注入 ·
-递归 Zanzibar userset · 报表/流程 WHERE 注入接缝 · native pages + OpenAPI/Swagger · L1/L2 缓存（Redis）。
+D6 PG RLS DDL 生成兜底 · 递归 Zanzibar userset（组→成员多跳）· 报表/流程 WHERE 注入接缝 ·
+native pages + OpenAPI/Swagger · L1/L2 缓存（Redis）。

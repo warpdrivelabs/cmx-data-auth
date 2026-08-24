@@ -47,6 +47,50 @@ pub async fn compile(Json(req): Json<CompileReq>) -> Result<Json<ApiResp<Value>>
     ok(json!({ "decision": d, "compiled": compiled }))
 }
 
+/// `GET /demo/vouchers` —— **D6 演示：权限无感的业务 handler**。
+///
+/// 它只声明消费中间件注入的 `DataScope`，完全不 import 任何策略/授权/维度概念。收到的
+/// `scope.where_sql`/`scope.params` 已是数据权限编译好的下推片段，直接拼进自己的 SQL 即可。
+/// 这里不连真库，只回显"业务 handler 会怎样用它"以证明接缝。
+pub async fn demo_vouchers(req: axum::extract::Request) -> Result<Json<ApiResp<Value>>> {
+    let scope = crate::pep::scope_from(req.extensions())?;
+    let business_sql = format!(
+        "SELECT id, ou_id, owner, status, amount FROM voucher WHERE {} ORDER BY biz_date DESC LIMIT 50",
+        scope.where_sql
+    );
+    ok(json!({
+        "note": "业务 handler 权限无感：仅消费中间件注入的 DataScope",
+        "effect": scope.effect,
+        "businessSql": business_sql,
+        "scopeParams": scope.params,
+        "obligations": scope.obligations,
+    }))
+}
+
+/// `POST /enforce` body：`{ subject, resource, rows }`。
+/// decide 后在内存里过滤 rows + 脱敏列（archetype-③，全程不碰 DB）。
+#[derive(Deserialize)]
+pub struct EnforceReq {
+    pub subject: Subject,
+    pub resource: Resource,
+    #[serde(default)]
+    pub rows: Vec<serde_json::Map<String, Value>>,
+}
+
+pub async fn enforce(Json(req): Json<EnforceReq>) -> Result<Json<ApiResp<Value>>> {
+    let d = engine::decide(&req.subject, &req.resource).await?;
+    let total = req.rows.len();
+    let (kept, filtered) = engine::enforce(&d, req.rows)?;
+    ok(json!({
+        "effect": d.effect,
+        "total": total,
+        "kept": kept.len(),
+        "filtered": filtered,
+        "rows": kept,
+        "obligations": d.obligations,
+    }))
+}
+
 // ─────────────────── policy CRUD ───────────────────
 
 pub async fn list_policies() -> Result<Json<ApiResp<Value>>> {

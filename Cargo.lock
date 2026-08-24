@@ -676,7 +676,9 @@ dependencies = [
  "cmx-dataauth-core",
  "cmx-dataauth-store-pg",
  "cmx-database-pg",
+ "cmx-rule-engine",
  "cmx-rule-feel",
+ "cmx-rule-model",
  "cmx-service-base",
  "cmx-web-monitor",
  "jsonwebtoken",
@@ -780,6 +782,16 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "cmx-rule-engine"
+version = "0.1.0"
+dependencies = [
+ "cmx-rule-feel",
+ "cmx-rule-model",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
