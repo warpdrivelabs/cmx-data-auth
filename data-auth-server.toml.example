@@ -1,0 +1,21 @@
+# cmx-dataauth-server 本地启动配置示例。复制为 data-auth-server.toml（勿提交含密钥的真实配置）。
+# 框架级字段（host/port/log）走 [server] 段（chassis 读）；业务字段走 [auth]/[datasource]（本 bin 读）。
+
+[server]
+host = "0.0.0.0"
+port = 8096
+log_dir = "logs"
+log_level = "info"
+
+[auth]
+# off（默认，单租户零回归）| jwt
+mode = "off"
+# jwt_secret = "change-me"
+# jwt_tenant_claim = "tenant"
+# jwt_roles_claim = "roles"
+# api_keys = "key1:tenantA,key2:tenantB"
+# single（默认）| multi（每租户一库 dataauth_<tenant>）
+tenancy = "single"
+
+[datasource]
+dataauth_pg_url = "postgres://postgres:postgres@127.0.0.1:5432/fico"

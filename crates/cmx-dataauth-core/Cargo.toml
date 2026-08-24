@@ -1,0 +1,17 @@
+[package]
+name = "cmx-dataauth-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "数据权限引擎语义中立内核：Subject/Resource/约束 AST/部分求值 PDP/多后端编译器。零 DB、零 cmx-* infra 依赖，可 wasm/嵌入式复用。"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

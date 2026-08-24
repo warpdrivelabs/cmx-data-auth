@@ -1,0 +1,57 @@
+# cmx-data-auth —— 独立数据权限微服务（决策/执行分离 + 约束 AST 多后端编译；参照 cmx-rulesengine 骨架）。
+#
+# 方案见 docs/数据权限完整方案.md。本 workspace 承载与平台/框架解耦的**数据权限引擎**全部 crate
+# （core/store-pg/app）+ 独立可跑 bin（cmx-dataauth-server）。
+#
+# 依赖策略（与 cmx-rulesengine 逐一对齐）：域内 dataauth crate 纯 path；基础设施（cmx-database-pg /
+# cmx-core / cmx-web-chassis / cmx-web-monitor / cmx-service-base）以 path 复用 cmx-container 的成员
+# crate（它们仍属 cmx-container workspace）；FEEL 复用 cmx-rulesengine 的 cmx-rule-feel；外部 crate 走
+# aliyun 镜像（见 .cargo/config.toml），版本与 cmx-container 根对齐以便 Cargo 合一。
+[workspace]
+resolver = "2"
+members = [
+    "crates/cmx-dataauth-core",
+    "crates/cmx-dataauth-store-pg",
+    "crates/cmx-dataauth-app",
+    "crates/cmx-dataauth-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["skylake@pansoft.com"]
+
+[workspace.dependencies]
+# —— 域内 dataauth crate（纯 path，不经私仓）——
+cmx-dataauth-core = { path = "crates/cmx-dataauth-core", version = "0.1.0" }
+cmx-dataauth-store-pg = { path = "crates/cmx-dataauth-store-pg", version = "0.1.0" }
+cmx-dataauth-app = { path = "crates/cmx-dataauth-app", version = "0.1.0" }
+
+# —— 复用 cmx-container 基础设施（跨 workspace 路径；仍是 cmx-container 成员，非本库成员）——
+cmx-database-pg = { path = "../cmx-container/crates/libs/cmx-infra/cmx-database-pg", version = "0.1.12" }
+cmx-core = { path = "../cmx-container/crates/libs/cmx-core", version = "0.1.12" }
+cmx-web-chassis = { path = "../cmx-container/crates/libs/cmx-web-chassis", version = "0.1.12" }
+cmx-web-monitor = { path = "../cmx-container/crates/libs/cmx-web-monitor", version = "0.1.12" }
+cmx-service-base = { path = "../cmx-container/crates/libs/cmx-service-base", version = "0.1.12", default-features = false }
+
+# —— 复用 cmx-rulesengine 的 FEEL 引擎（评脱敏 condition_expr，如 user.grade < 5）——
+cmx-rule-feel = { path = "../cmx-rulesengine/crates/cmx-rule-feel", version = "0.1.0" }
+
+# —— 外部 crate（版本照抄 cmx-container 根 [workspace.dependencies]，与 rule/flow 对齐）——
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+toml = "0.8"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+uuid = { version = "1.21", features = ["v4", "serde"] }
+async-trait = "0.1"
+anyhow = "1.0"
+jsonwebtoken = "9"
+tokio = { version = "1.41", features = ["full"] }
+axum = { version = "0.8.9", features = ["macros", "multipart"] }
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

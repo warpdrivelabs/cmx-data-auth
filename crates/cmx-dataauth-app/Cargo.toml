@@ -1,0 +1,24 @@
+[package]
+name = "cmx-dataauth-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "数据权限引擎平台中立应用层（一芯）：编排 decide/compile、CRUD handler、泛型路由、租户/认证。"
+
+[dependencies]
+cmx-dataauth-core.workspace = true
+cmx-dataauth-store-pg.workspace = true
+cmx-database-pg.workspace = true
+cmx-core.workspace = true
+cmx-web-monitor.workspace = true
+cmx-service-base.workspace = true
+cmx-rule-feel.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+jsonwebtoken.workspace = true

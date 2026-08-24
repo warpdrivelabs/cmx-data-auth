@@ -1,0 +1,17 @@
+[package]
+name = "cmx-dataauth-store-pg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "DataAuthStore 的 tokio-postgres 实现 + 层级维度展开器（WITH RECURSIVE）。"
+
+[dependencies]
+cmx-dataauth-core.workspace = true
+cmx-database-pg.workspace = true
+cmx-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
