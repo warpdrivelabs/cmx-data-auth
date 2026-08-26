@@ -7,6 +7,7 @@ pub mod auth;
 pub mod dashboard;
 pub mod engine;
 pub mod handlers;
+pub mod matcache;
 pub mod pep;
 pub mod policy_source;
 pub mod resp;
@@ -90,6 +91,9 @@ where
             get(handlers::list_dimension_values),
         )
         .route("/dimension-values", post(handlers::save_dimension_value))
+        // —— L3 物化权限集缓存：前端查字典直取 + 再分配刷新 ——
+        .route("/dict/{dict_code}/permitted", get(handlers::dict_permitted))
+        .route("/dict/{dict_code}/refresh", post(handlers::dict_refresh))
         // —— 审计 / 大盘 ——
         .route("/audit-logs", get(handlers::list_audit))
         .route("/stats", get(handlers::stats))

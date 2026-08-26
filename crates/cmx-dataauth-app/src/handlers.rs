@@ -5,7 +5,7 @@
 
 use crate::engine;
 use crate::resp::{ApiResp, AuthzError, Result};
-use crate::tenant::current_tenant;
+use crate::tenant::{current_roles, current_tenant, current_user};
 use axum::extract::{Path, Query};
 use axum::Json;
 use cmx_dataauth_core::{
@@ -147,15 +147,27 @@ pub async fn save_grant(Json(g): Json<Grant>) -> Result<Json<ApiResp<Value>>> {
         .save_grant(&t, &g)
         .await
         .map_err(|e| AuthzError::internal(format!("存授权失败: {e}")))?;
+    // L3 物化缓存精准失效：该主体在此字典维度上的可见集需重算（"重分配即刷新"）。
+    crate::matcache::invalidate_for_grant(&t, g.dim_key.as_deref(), &g.subject_type, &g.subject_id);
     ok(json!({ "id": id }))
 }
 
 pub async fn delete_grant(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
-    let n = engine::store()
+    let st = engine::store();
+    // 删前先取该授权的维度/主体，以便精准失效物化缓存。
+    let victim = st
+        .list_grants(&t)
+        .await
+        .ok()
+        .and_then(|gs| gs.into_iter().find(|g| g.id == id));
+    let n = st
         .delete_grant(&t, id)
         .await
         .map_err(|e| AuthzError::internal(format!("删授权失败: {e}")))?;
+    if let Some(g) = victim {
+        crate::matcache::invalidate_for_grant(&t, g.dim_key.as_deref(), &g.subject_type, &g.subject_id);
+    }
     ok(json!({ "deleted": n }))
 }
 
@@ -267,7 +279,69 @@ pub async fn save_dimension_value(Json(dv): Json<DimensionValue>) -> Result<Json
         .save_dimension_value(&t, &dv)
         .await
         .map_err(|e| AuthzError::internal(format!("存维度值失败: {e}")))?;
+    // 字典条目变化影响全量集与已物化集 → 失效该字典缓存。
+    crate::matcache::invalidate(&t, &dv.dim_key, None);
     ok(json!({ "ok": true }))
+}
+
+// ─────────────────── L3 物化权限集缓存（急切物化） ───────────────────
+
+/// `GET /dict/{dictCode}/permitted[?userId=&roles=r1,r2]` —— 取当前主体在该字典上的可见条目。
+/// 缓存优先（O(1) 直取）；未命中即物化。off 模式无身份时可用 query 覆写主体（便于测试/服务间调用）。
+#[derive(Deserialize)]
+pub struct PermittedQuery {
+    #[serde(rename = "userId", default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    roles: Option<String>,
+}
+
+pub async fn dict_permitted(
+    Path(dict_code): Path<String>,
+    Query(q): Query<PermittedQuery>,
+) -> Result<Json<ApiResp<Value>>> {
+    let t = current_tenant();
+    let user = q.user_id.clone().or_else(current_user).unwrap_or_default();
+    let roles: Vec<String> = match &q.roles {
+        Some(s) => s
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect(),
+        None => current_roles(),
+    };
+    let p = crate::matcache::permitted_entries(&t, &dict_code, &user, &roles).await?;
+    ok(json!({
+        "dictCode": dict_code,
+        "fromCache": p.from_cache,
+        "materializedAt": p.materialized_at,
+        "count": p.entries.len(),
+        "entries": p.entries,
+    }))
+}
+
+/// `POST /dict/{dictCode}/refresh` body：`{ subjectType?, subjectId? }`。
+/// 失效该字典的物化缓存（指定 principal 则只失效该键，否则整字典）。权限再分配后调用。
+#[derive(Deserialize, Default)]
+pub struct RefreshReq {
+    #[serde(rename = "subjectType", default)]
+    subject_type: Option<String>,
+    #[serde(rename = "subjectId", default)]
+    subject_id: Option<String>,
+}
+
+pub async fn dict_refresh(
+    Path(dict_code): Path<String>,
+    body: Option<Json<RefreshReq>>,
+) -> Result<Json<ApiResp<Value>>> {
+    let t = current_tenant();
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let n = match (req.subject_type.as_deref(), req.subject_id.as_deref()) {
+        (Some(st), Some(si)) => crate::matcache::invalidate(&t, &dict_code, Some((st, si))),
+        _ => crate::matcache::invalidate(&t, &dict_code, None),
+    };
+    ok(json!({ "dictCode": dict_code, "invalidated": n }))
 }
 
 // ─────────────────── audit / stats ───────────────────
@@ -304,5 +378,6 @@ pub async fn stats() -> Result<Json<ApiResp<Value>>> {
         "grants": grants,
         "tuples": tuples,
         "recentAudit": recent_audit,
+        "matCacheEntries": crate::matcache::cache_size(),
     }))
 }

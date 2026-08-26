@@ -36,6 +36,7 @@ cmx-dataauth-server    独立可跑 bin（cmx-web-chassis 骨架，:8096）
 | D5 | 基础 ReBAC 关系元组（`Relation` → `lookup_resources` → `In`） | store-pg + app `engine.rs` |
 | D3 | **决策表作策略源**：`source=decisionTable` 的策略经 cmx-rulesengine 求值成内联 Constraint | app `policy_source.rs` |
 | D6 | **PEP 中间件自动注入**：业务 handler 权限无感，只声明 `DataScope`；Deny→403 短路 | app `pep.rs` |
+| L3 | **物化权限集缓存**（空间换时间）：简单字典授权时算好可见集直接缓存，查询 O(1) 直取，再分配刷新 | app `matcache.rs` |
 | — | 部分求值 PDP（超管短路 / Deny 短路 / 无授权 fail-closed / 空维度坍缩 False） | core `pdp.rs` |
 | — | db-per-tenant（task_local 租户 scope + 懒备库）+ 决策审计 | app `tenant.rs`/`tenancy.rs` |
 
@@ -64,8 +65,18 @@ DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=80
 - `POST /compile` — `{subject, resource, backend}` → decide + 编译（`backend` ∈ `sql`|`es`|`rowfilter`）
 - `POST /enforce` — `{subject, resource, rows}` → decide + **内存过滤 rows + 列脱敏**（archetype-③，不碰 DB）
 - `GET /demo/vouchers` — **D6 演示**：权限无感业务 handler，经 `pep::guard` 自动注入 `DataScope`
+- `GET /dict/{dictCode}/permitted[?userId=&roles=]` — **L3 物化缓存**：直取主体在该字典的可见条目
+- `POST /dict/{dictCode}/refresh` — 失效该字典物化缓存（body 可选 `{subjectType, subjectId}` 精准失效）
 - CRUD：`/policies`（`source` ∈ `inline`|`decisionTable`）`/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
 - `/audit-logs` · `/stats` · 根 `/` 监控大盘 · `/_mon` 技术监控
+
+### L3 物化权限集缓存（空间换时间）
+
+对**枚举可穷尽的简单字典**（组织机构/成本中心/项目），授权时就把"某 principal 可见哪些条目"预计算成
+ID 集合缓存（键 = `(tenant, dictCode, subjectType, subjectId)`）。前端查字典 O(1) 直取（`GET /dict/{code}/permitted`），
+用户有效集 = `cache[user:自身] ∪ cache[role:各角色]` 去重。**再分配即刷新**：`save_grant`/`delete_grant` 精准失效
+对应 principal 键，`POST /dict/{code}/refresh` 显式刷新。物化复用 `WITH RECURSIVE` 维度展开；超管/授 `*` → 全量。
+判据：仅小字典（大表集合会爆炸，仍走 L1/L2 惰性下推）。载体 M1 进程内，生产换 Redis。
 
 ### D3 决策表作策略源
 
@@ -95,7 +106,7 @@ POST /compile { ..., backend:"sql" }
 - `cargo build --workspace` ✓（403 crates，离线 aliyun 镜像）
 - `cargo test --workspace` ✓ 39 单测（1 ignored = pep.rs 文档示例）
 - `cargo clippy --workspace` ✓ 0 警告
-- 真机启动 + `dataauth.sh` 端到端 ✓ 13/13（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC / enforce 内存过滤+脱敏 / D3 决策表源 / D6 PEP 注入）
+- 真机启动 + `dataauth.sh` 端到端 ✓ 19/19（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC / enforce 内存过滤+脱敏 / D3 决策表源 / D6 PEP 注入 / L3 物化缓存）
 
 ## 非目标（后续）
 

@@ -99,6 +99,28 @@ else
   echo "  ⏭  跳过（需 DATAAUTH_AUTH_MODE=jwt 起服务；off 模式无 user 身份）"
 fi
 
+echo "== 10. L3 物化权限集缓存（空间换时间）=="
+# org 字典树：华东1001→{沪100101,杭100102}；华南2001→{广2002}。
+for row in '1001|华东|' '100101|上海|1001' '100102|杭州|1001' '2001|华南|' '2002|广州|2001'; do
+  IFS='|' read -r v l p <<< "$row"
+  curl -s -XPOST $B/dimension-values -H "$J" -d "{\"dimKey\":\"org\",\"dimValue\":\"$v\",\"label\":\"$l\",\"parentValue\":\"$p\"}" >/dev/null
+done
+curl -s -XPOST $B/grants -H "$J" -d '{"policyId":0,"subjectType":"ROLE","subjectId":"mc-fin","dimKey":"org","dimValues":["1001"]}' >/dev/null
+M1=$(curl -s "$B/dict/org/permitted?roles=mc-fin")
+chk "首查物化 fromCache=false" '"fromCache":false' "$M1"
+chk "华东子树 3 条" '"count":3' "$M1"
+M2=$(curl -s "$B/dict/org/permitted?roles=mc-fin")
+chk "再查缓存命中 fromCache=true" '"fromCache":true' "$M2"
+# 重分配追加华南 → save 自动失效。
+GID=$(curl -s "$B/grants" | python3 -c 'import sys,json;print([g["id"] for g in json.load(sys.stdin)["data"] if g["subjectId"]=="mc-fin"][0])')
+curl -s -XPOST $B/grants -H "$J" -d "{\"id\":$GID,\"policyId\":0,\"subjectType\":\"ROLE\",\"subjectId\":\"mc-fin\",\"dimKey\":\"org\",\"dimValues\":[\"1001\",\"2001\"]}" >/dev/null
+M3=$(curl -s "$B/dict/org/permitted?roles=mc-fin")
+chk "重分配后自动失效重算 fromCache=false" '"fromCache":false' "$M3"
+chk "新集含华南 2002" '"2002"' "$M3"
+# 显式刷新端点。
+MR=$(curl -s -XPOST $B/dict/org/refresh)
+chk "显式 refresh 返回失效键数" '"invalidated"' "$MR"
+
 echo
 echo "==== 通过 $pass · 失败 $fail ===="
 [[ $fail -eq 0 ]]
