@@ -98,7 +98,7 @@ async fn main() -> cmx_web_chassis::Result<()> {
     let mut cfg = ChassisConfig::load("dataauth", "data-auth-server.toml");
     apply_toml_env();
     if std::env::var("DATAAUTH_PORT").is_err() && cfg.port == 8080 {
-        cfg.port = 8096; // dataauth 默认端口（避开平台 8080 / flow 8091 / report 8092 / model 8093 / rule 8094 / mdm 8095）。
+        cfg.port = 8098; // dataauth 默认端口（避开平台 8080 / flow 8091 / report 8092 / model 8093 / rule 8094 / mdm 8095 / meta 8096 / onto 8097）。
     }
 
     let banner = BannerSpec::defaults("dataauth")
@@ -111,10 +111,19 @@ async fn main() -> cmx_web_chassis::Result<()> {
         .merge(dataauth_routes::<()>())
         .layer(axum::middleware::from_fn(cmx_web_monitor::observe))
         .layer(axum::middleware::from_fn(cmx_dataauth_app::auth_middleware));
-    let api_router = axum::Router::new().merge(authed);
+    let api_router = axum::Router::new()
+        .merge(authed)
+        // 公开契约（免认证，挂认证之外）：OpenAPI JSON 供 Swagger/门户消费。
+        .route(
+            "/dataauth/v1/openapi.json",
+            axum::routing::get(cmx_dataauth_app::openapi::openapi_json),
+        );
     let app_router = axum::Router::new()
         // 根 → 监控大盘（免认证，轮询 /api/dataauth/v1/stats）。
         .route("/", axum::routing::get(cmx_dataauth_app::dashboard::dashboard))
+        // 管理工作台（#17）+ Swagger UI（#18）——免认证静态页；门户可反代。
+        .route("/console", axum::routing::get(cmx_dataauth_app::console::console))
+        .route("/swagger", axum::routing::get(cmx_dataauth_app::openapi::swagger))
         .nest("/api", api_router);
 
     // 技术监控（/_mon）。

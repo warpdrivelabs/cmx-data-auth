@@ -5,10 +5,12 @@
 
 pub mod auth;
 pub mod cache;
+pub mod console;
 pub mod dashboard;
 pub mod engine;
 pub mod handlers;
 pub mod matcache;
+pub mod openapi;
 pub mod pep;
 pub mod policy_source;
 pub mod resp;

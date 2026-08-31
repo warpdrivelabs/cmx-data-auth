@@ -3,7 +3,7 @@
 
 [server]
 host = "0.0.0.0"
-port = 8096
+port = 8098
 log_dir = "logs"
 log_level = "info"
 

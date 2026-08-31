@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # cmx-dataauth P0 认证/管理面冒烟（须以 jwt 模式起服务）：
 #   DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico \
-#     DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret SERVER__PORT=8096 \
+#     DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret SERVER__PORT=8098 \
 #     cargo run -p cmx-dataauth-server &
 #   ./dataauth-auth.sh
 #
 # 覆盖 P0：#1 管理面守卫（非管理员写→403、管理员读→200）· #2 JWT 校验 exp（无 exp→401、
 # 默认密钥→拒）· #4 写/删执行接缝（DELETE 注入 scoped WHERE）· 数据面读 PEP 注入。
 set -euo pipefail
-B="${DATAAUTH_BASE:-http://127.0.0.1:8096/api/dataauth/v1}"
+B="${DATAAUTH_BASE:-http://127.0.0.1:8098/api/dataauth/v1}"
 SECRET="${DATAAUTH_JWT_SECRET:-test-secret}"
 pass=0; fail=0
 chk() { if [[ "$3" == *"$2"* ]]; then echo "  ✅ $1"; pass=$((pass+1)); else echo "  ❌ $1"; echo "     期望含: $2"; echo "     实际: $3"; fail=$((fail+1)); fi; }

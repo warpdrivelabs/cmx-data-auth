@@ -2,11 +2,11 @@
 # cmx-dataauth 冒烟测试：seed 维度树 + 策略 + 授权 + 脱敏 + ReBAC，跑 decide/compile 断言。
 #
 # 用法（先启动服务）：
-#   DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=8096 \
+#   DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=8098 \
 #     cargo run -p cmx-dataauth-server &
 #   ./dataauth.sh
 set -euo pipefail
-B="${DATAAUTH_BASE:-http://127.0.0.1:8096/api/dataauth/v1}"
+B="${DATAAUTH_BASE:-http://127.0.0.1:8098/api/dataauth/v1}"
 pass=0; fail=0
 chk() { # chk "名称" "期望子串" "实际"
   if [[ "$3" == *"$2"* ]]; then echo "  ✅ $1"; pass=$((pass+1));
@@ -246,6 +246,13 @@ curl -s -XPOST $B/policies -H "$J" -d "{\"name\":\"future-policy\",\"resourceKin
 curl -s -XPOST $B/grants -H "$J" -d '{"policyId":0,"subjectType":"USER","subjectId":"ufut","dimKey":"org","dimValues":["1001"]}' >/dev/null
 DFUT=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"ufut"},"resource":{"kind":"voucher-fut","action":"read"}}')
 chk "未生效策略 → decide 拒绝" '"effect":"deny"' "$DFUT"
+
+echo "== 18. 工作台 #17 + OpenAPI #18 =="
+ROOT="${B%/api/dataauth/v1}"
+chk "OpenAPI 3.0 契约有效" '"openapi":"3.0.3"' "$(curl -s $B/openapi.json)"
+chk "OpenAPI 覆盖 /decide" '"/decide"' "$(curl -s $B/openapi.json)"
+chk "管理工作台 /console 可达" "数据权限工作台" "$(curl -s $ROOT/console)"
+chk "Swagger UI /swagger 可达" "swagger-ui" "$(curl -s $ROOT/swagger)"
 
 echo
 echo "==== 通过 $pass · 失败 $fail ===="

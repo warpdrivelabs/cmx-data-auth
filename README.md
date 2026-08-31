@@ -15,7 +15,7 @@ cmx-dataauth-store-pg  DataAuthStore 的 tokio-postgres 实现 + 层级维度展
    ▲
 cmx-dataauth-app       平台中立应用层（一芯）：decide/compile 编排 + CRUD handler + 泛型路由 + 租户/认证 + FEEL 脱敏
    ▲
-cmx-dataauth-server    独立可跑 bin（cmx-web-chassis 骨架，:8096）
+cmx-dataauth-server    独立可跑 bin（cmx-web-chassis 骨架，:8098）
 ```
 
 - **一芯多壳**：`cmx-dataauth-app` 的 handler 不绑 `State`，故 `dataauth_routes::<S>()` 对任意 state 泛型成立
@@ -48,8 +48,8 @@ cmx-dataauth-server    独立可跑 bin（cmx-web-chassis 骨架，:8096）
 ## 运行
 
 ```bash
-# 启动（默认端口 8096，库 fico）
-DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=8096 \
+# 启动（默认端口 8098，库 fico）
+DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=8098 \
   cargo run -p cmx-dataauth-server
 
 # 冒烟测试（幂等，可重复跑）
@@ -114,6 +114,31 @@ DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret ./dataauth-auth.sh
 - 治理：`POST /explain`（决策解释）· `GET /policies/overlap?resourceKind=&action=`（策略重叠/冲突分析）· `GET /change-logs`（配置变更审计）
 - `/audit-logs`（含 `subjectCtx`/`obligations` 上下文）· `POST /audit-logs/prune?beforeDays=90`（保留期清理）· `/stats` · 根 `/` 监控大盘 · `/_mon` 技术监控
 
+### 页面与契约（免认证，门户可反代）
+
+- `GET /console` —— **管理工作台（#17）**：自包含单页 SPA（大盘/策略/授权/脱敏/维度/关系/决策解释/审计），off 模式直接可用。
+- `GET /swagger` —— Swagger UI（#18，CDN）。
+- `GET /api/dataauth/v1/openapi.json` —— OpenAPI 3.0 契约（#18，手写 JSON，20 路径 4 schema）。
+
+### 门户接入（#16）
+
+**反代 + 菜单已接线（跨 workspace，编译绿 + 契约核实）**。数据权限侧 `/console` `/swagger` `/openapi.json` 为稳定免认证端点；
+门户侧（`cmx-container` + `cmx-portalservice`）已加：
+
+- 新反代壳 crate `cmx-container/crates/libs/cmx-dataauth/cmx-dataauth-proxy`（镜像 `cmx-meta-proxy`）：
+  `DataAuthProxyModule` 转发 `/api/dataauth/*` → 远程引擎；`console_routes` 顶层反代 `/console` + `/swagger`（非 `/api`）。
+- `cmx-platform-app` 挂载：`routes.rs` 加 `merge_dataauth`（`/api/dataauth/*`），`router.rs` 顶层 merge `/console`+`/swagger`（免认证边缘，API 仍认证）。
+- 配置：`portal-server*.toml` 的 `[center_client.services]` 加 `dataauth = { url = "http://127.0.0.1:8098", … }`。
+- **端口去冲突**：引擎默认端口 8096 与门户已占的 `meta`(:8096) 冲突 → 数据权限改用 **:8098**（脚本/示例同步）。
+- **菜单/模块登记**：`dataauth-portal-menu.sql`（幂等，在门户 `cmx` 库执行）——`cmx_module` 行 + `cmx_menu` 叶子菜单，
+  经**前端运行时代码核实的契约**打开反代工作台：门户 SPA 忽略 `open_type`，独立 URL 页经四区工作台 iframe 视图加载，
+  URL 落在 `definition.workspace.content.views[].data.src = "/console"`。配套 `module.json` 在
+  `cmx-container/assets/portal/data/modules/basic/dataplatform/dataauth/`。
+
+`cmx-platform-app` 与 `cmx-portal-server` 均编译通过；菜单 SQL 已校验（JSON 合法、iframe src 契约正确、列/值 22=22）。
+**门户运行时反代未在本机验证**（门户需远程 `cmx` 库 + Redis）；反代逻辑逐字节镜像在用的 meta/model/rules 反代壳，菜单契约经前端源码核实。
+未提交入共享 `init_dml.sql`——数据权限菜单随引擎部署单独落库（与反代配置 opt-in 同理），不污染每次平台部署的 seed。
+
 ### L3 物化权限集缓存（空间换时间）
 
 对**枚举可穷尽的简单字典**（组织机构/成本中心/项目），授权时就把"某 principal 可见哪些条目"预计算成
@@ -150,10 +175,10 @@ POST /compile { ..., backend:"sql" }
 - `cargo build --workspace` ✓（离线 aliyun 镜像）
 - `cargo test --workspace` ✓ 47 单测（1 ignored；含 inherit / 条件 Deny / Deny-all / ORG 主体 / 列隐藏 / RLS 生成 回归）
 - `cargo clippy --workspace` ✓ 0 警告
-- 真机启动 + `dataauth.sh` 端到端 ✓ 59/59（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC 单跳+**多跳组成员** /
+- 真机启动 + `dataauth.sh` 端到端 ✓ 63/63（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC 单跳+**多跳组成员** /
   enforce 内存过滤+脱敏 / **列隐藏 HIDE** / D3 决策表源 / L3 物化缓存 / **inherit=false** / **ORG 主体** / **条件 Deny** /
   **RLS DDL 生成** / **列表分页检索** / **审计上下文** / **审计 TTL 清理** / **L1 decide+展开缓存** / **变更审计** / **决策解释** /
-  **策略重叠分析** / **生效期 valid_from/to**）
+  **策略重叠分析** / **生效期 valid_from/to** / **OpenAPI + 管理工作台**）
 - 认证/管理面 `dataauth-auth.sh`（jwt 模式）✓ 10/10（**#1 管理面 403/200 · #2 exp/密钥/无令牌 401 · #4 删侧 scoped DELETE + 无权 403**）
 
 ## 非目标（后续）
