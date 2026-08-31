@@ -12,6 +12,10 @@ chk() { # chk "名称" "期望子串" "实际"
   if [[ "$3" == *"$2"* ]]; then echo "  ✅ $1"; pass=$((pass+1));
   else echo "  ❌ $1"; echo "     期望含: $2"; echo "     实际: $3"; fail=$((fail+1)); fi
 }
+chkno() { # chkno "名称" "不应含子串" "实际"
+  if [[ "$3" != *"$2"* ]]; then echo "  ✅ $1"; pass=$((pass+1));
+  else echo "  ❌ $1"; echo "     不应含: $2"; echo "     实际: $3"; fail=$((fail+1)); fi
+}
 J='content-type: application/json'
 
 echo "== 0. 清理（幂等：删旧策略/授权/元组，避免跨次累积污染）=="
@@ -71,6 +75,18 @@ RC=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"u77","roles":["
 chk "Relation 解析为 rptsmoke_id IN" "rptsmoke_id IN" "$RC"
 chk "参数含 RX1" '"RX1"' "$RC"
 
+echo "== 6b. ReBAC 多跳（组成员闭包，P1#6）=="
+# alice ∈ eng ∈ eng2；mdoc:MD1 viewer @ group:eng2（经嵌套组）；mdoc:MD2 viewer @ user:alice（直接）
+curl -s -XPOST $B/relation-tuples -H "$J" -d '{"objectKind":"group","objectId":"eng","relation":"member","subjectKind":"user","subjectId":"alice"}' >/dev/null
+curl -s -XPOST $B/relation-tuples -H "$J" -d '{"objectKind":"group","objectId":"eng2","relation":"member","subjectKind":"group","subjectId":"eng"}' >/dev/null
+curl -s -XPOST $B/relation-tuples -H "$J" -d '{"objectKind":"mdoc","objectId":"MD1","relation":"viewer","subjectKind":"group","subjectId":"eng2"}' >/dev/null
+curl -s -XPOST $B/relation-tuples -H "$J" -d '{"objectKind":"mdoc","objectId":"MD2","relation":"viewer","subjectKind":"user","subjectId":"alice"}' >/dev/null
+MRP=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"smoke-rebac2","resourceKind":"mdoc-smoke","action":"read","effect":"permit","constraintTpl":{"kind":"relation","field":"mdoc_id","rel":"viewer","subject":"$user"}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
+curl -s -XPOST $B/grants -H "$J" -d "{\"policyId\":$MRP,\"subjectType\":\"USER\",\"subjectId\":\"alice\"}" >/dev/null
+MRC=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"alice"},"resource":{"kind":"mdoc-smoke","action":"read","rowCtx":["mdoc_id"]},"backend":"sql"}')
+chk "多跳含直接授权 MD2" '"MD2"' "$MRC"
+chk "多跳含嵌套组 MD1（alice∈eng∈eng2）" '"MD1"' "$MRC"
+
 echo "== 7. ENFORCE 内存过滤 + 脱敏（archetype-③，不碰 DB）=="
 # 复用第 2 步的 voucher-smoke 策略（u42@org=1001 + public）。补一条 salary 脱敏规则。
 curl -s -XPOST $B/mask-rules -H "$J" -d '{"resourceKind":"voucher-smoke","column":"amount","maskType":"FULL"}' >/dev/null
@@ -86,6 +102,18 @@ EN=$(curl -s -XPOST $B/enforce -H "$J" -d '{
 chk "保留 2 行（org 子孙+owner / org+public）" '"kept":2' "$EN"
 chk "过滤 1 行（org 不在集）" '"filtered":1' "$EN"
 chk "amount 脱敏为 ****" '"amount":"****"' "$EN"
+
+echo "== 7b. 列隐藏 HIDE（P1#8）=="
+curl -s -XPOST $B/mask-rules -H "$J" -d '{"resourceKind":"voucher-smoke","column":"secret","maskType":"HIDE"}' >/dev/null
+EH=$(curl -s -XPOST $B/enforce -H "$J" -d '{
+  "subject":{"userId":"u42","roles":["finance"]},
+  "resource":{"kind":"voucher-smoke","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["ou_id","owner","status","amount"]},
+  "rows":[{"ou_id":"100101","owner":"u42","status":"draft","amount":100,"secret":"TOP"}]
+}')
+chk "保留 1 行" '"kept":1' "$EH"
+chkno "HIDE 列值不外泄（无 secret:TOP）" '"secret":"TOP"' "$EH"
+chk "数据行无 HIDE 列键" '"rows":[{"ou_id":"100101","owner":"u42","status":"draft","amount":"****"}]' "$EH"
+chk "amount 仍脱敏 ****" '"amount":"****"' "$EH"
 
 echo "== 8. D3 决策表作策略源（region=east→org；否则 false）=="
 DP=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"smoke-dt","resourceKind":"dt-smoke","action":"read","effect":"permit","source":"decisionTable","constraintTpl":{"kind":"decisionTable","hitPolicy":"F","inputs":[{"id":"i1","label":"区域","expression":"region"}],"outputs":[{"id":"o1","label":"约束","name":"constraint"}],"rules":[{"id":"r1","inputEntries":["\"east\""],"outputEntries":["\"{\\\"kind\\\":\\\"in\\\",\\\"field\\\":\\\"ou_id\\\",\\\"values\\\":[\\\"$dim:org\\\"]}\""]},{"id":"r2","inputEntries":["-"],"outputEntries":["\"{\\\"kind\\\":\\\"false\\\"}\""]}]}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
@@ -137,6 +165,15 @@ chk "新集含华南 2002" '"2002"' "$M3"
 # 显式刷新端点。
 MR=$(curl -s -XPOST $B/dict/org/refresh)
 chk "显式 refresh 返回失效键数" '"invalidated"' "$MR"
+
+echo "== 11. RLS DDL 生成（防绕过纵深，P1#11）=="
+RLS=$(curl -s -XPOST $B/rls/ddl -H "$J" -d '{"table":"voucher","dimColumn":"ou_id"}')
+chk "启用 RLS" "ENABLE ROW LEVEL SECURITY" "$RLS"
+chk "策略引用会话 GUC" "current_setting('dataauth.voucher_scope', true)" "$RLS"
+chk "维度列过滤 (fail-closed)" "ou_id::text = ANY (string_to_array" "$RLS"
+chk "set_config 写 scope" "set_config('dataauth.voucher_scope'" "$RLS"
+RLSBAD=$(curl -s -XPOST $B/rls/ddl -H "$J" -d '{"table":"v; DROP TABLE x","dimColumn":"ou_id"}')
+chk "非法表名被拒（防注入）" "非法标识符" "$RLSBAD"
 
 echo
 echo "==== 通过 $pass · 失败 $fail ===="

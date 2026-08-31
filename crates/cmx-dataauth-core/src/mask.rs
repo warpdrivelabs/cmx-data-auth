@@ -10,6 +10,10 @@ use serde_json::Value;
 
 /// 对单个值施加脱敏。非字符串值先转其字符串表示再脱敏（脱敏结果恒为字符串）。
 pub fn mask_value(v: &Value, mask_type: MaskType, pattern: Option<&str>) -> Value {
+    // Hide 语义是"移除列"，由投影层 apply_masks 处理；单值调用时回退为 Null。
+    if mask_type == MaskType::Hide {
+        return Value::Null;
+    }
     let s = match v {
         Value::Null => return Value::Null, // 空值不脱敏（无信息可泄露）。
         Value::String(s) => s.clone(),
@@ -19,6 +23,7 @@ pub fn mask_value(v: &Value, mask_type: MaskType, pattern: Option<&str>) -> Valu
         MaskType::Full => "****".to_string(),
         MaskType::Partial => partial(&s, pattern),
         MaskType::Hash => hash_token(&s),
+        MaskType::Hide => unreachable!("Hide 已在上方短路"),
     })
 }
 
@@ -63,14 +68,16 @@ fn hash_token(s: &str) -> String {
     format!("tok_{:016x}", h.finish())
 }
 
-/// 按义务列表对一组行（JSON 对象）逐列脱敏（就地修改）。
+/// 按义务列表对一组行（JSON 对象）逐列脱敏（就地修改）。`Hide` 移除列，其余替换值。
 pub fn apply_masks(rows: &mut [serde_json::Map<String, Value>], obligations: &[Obligation]) {
     if obligations.is_empty() {
         return;
     }
     for row in rows.iter_mut() {
         for ob in obligations {
-            if let Some(v) = row.get(&ob.column) {
+            if ob.mask_type == MaskType::Hide {
+                row.remove(&ob.column); // 列隐藏：移除键。
+            } else if let Some(v) = row.get(&ob.column) {
                 let masked = mask_value(v, ob.mask_type, ob.pattern.as_deref());
                 row.insert(ob.column.clone(), masked);
             }
@@ -145,5 +152,21 @@ mod tests {
         assert_eq!(rows[0]["salary"], json!("****"));
         assert_eq!(rows[0]["phone"], json!("138****5678"));
         assert_eq!(rows[0]["name"], json!("张三")); // 未列入义务 → 不动。
+    }
+
+    #[test]
+    fn apply_masks_hide_removes_column() {
+        let obs = vec![
+            Obligation { column: "ssn".into(), mask_type: MaskType::Hide, pattern: None },
+            Obligation { column: "salary".into(), mask_type: MaskType::Full, pattern: None },
+        ];
+        let mut rows = vec![json!({"name":"张三","ssn":"110101","salary":9000})
+            .as_object()
+            .unwrap()
+            .clone()];
+        apply_masks(&mut rows, &obs);
+        assert!(!rows[0].contains_key("ssn")); // Hide → 列被移除
+        assert_eq!(rows[0]["salary"], json!("****")); // 其余脱敏照常
+        assert_eq!(rows[0]["name"], json!("张三"));
     }
 }

@@ -270,10 +270,23 @@ impl DataAuthStore for PgDataAuthStore {
         subject_kind: &str,
         subject_id: &str,
     ) -> StoreResult<Vec<String>> {
+        // Zanzibar 多跳：先求主体的 userset 闭包 ug = 自身 + 其所属 group（沿 `member`/`group` 边递归上行，
+        // 含嵌套组），再取"任一 userset 作为 subject"在 (object_kind, relation) 上关联的对象。
+        // UNION 天然去重、防环。无 member/group 元组时 ug 退化为 {自身} → 等价单跳（向后兼容）。
+        let sql = "WITH RECURSIVE ug(sk, sid) AS ( \
+                     SELECT $3::text, $4::text \
+                     UNION \
+                     SELECT 'group'::text, t.object_id::text \
+                       FROM cmx_dataauth_relation_tuple t \
+                       JOIN ug ON t.subject_kind = ug.sk AND t.subject_id = ug.sid \
+                       WHERE t.relation = 'member' AND t.object_kind = 'group' \
+                   ) \
+                   SELECT DISTINCT tt.object_id FROM cmx_dataauth_relation_tuple tt \
+                     JOIN ug ON tt.subject_kind = ug.sk AND tt.subject_id = ug.sid \
+                     WHERE tt.object_kind = $1 AND tt.relation = $2";
         let ds = self
             .query(
-                "SELECT object_id FROM cmx_dataauth_relation_tuple \
-                 WHERE object_kind=$1 AND relation=$2 AND subject_kind=$3 AND subject_id=$4",
+                sql,
                 vec![
                     DataValue::String(object_kind.to_string()),
                     DataValue::String(relation.to_string()),
@@ -611,6 +624,7 @@ fn mask_type_str(m: MaskType) -> String {
         MaskType::Full => "FULL",
         MaskType::Partial => "PARTIAL",
         MaskType::Hash => "HASH",
+        MaskType::Hide => "HIDE",
     }
     .to_string()
 }
@@ -619,6 +633,7 @@ fn parse_mask_type(s: &str) -> MaskType {
     match s.to_ascii_uppercase().as_str() {
         "PARTIAL" => MaskType::Partial,
         "HASH" => MaskType::Hash,
+        "HIDE" => MaskType::Hide,
         _ => MaskType::Full,
     }
 }

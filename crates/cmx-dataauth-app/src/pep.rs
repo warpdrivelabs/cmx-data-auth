@@ -75,9 +75,18 @@ pub struct DataScope {
 }
 
 impl DataScope {
-    /// 对一组行就地施加脱敏义务（handler 查完库后调用）。
+    /// 对一组行就地施加脱敏义务（handler 查完库后调用）。含列隐藏（Hide → 移除列）。
     pub fn apply_masks(&self, rows: &mut [serde_json::Map<String, Value>]) {
         cmx_dataauth_core::apply_masks(rows, &self.obligations);
+    }
+
+    /// 隐藏列（`mask_type=Hide`）——业务 handler 应从 SELECT 投影中省略这些列（`****` ≠ 列不可见）。
+    pub fn hidden_columns(&self) -> Vec<&str> {
+        self.obligations
+            .iter()
+            .filter(|o| o.mask_type == cmx_dataauth_core::MaskType::Hide)
+            .map(|o| o.column.as_str())
+            .collect()
     }
 }
 

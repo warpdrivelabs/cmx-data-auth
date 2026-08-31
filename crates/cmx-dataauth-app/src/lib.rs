@@ -115,6 +115,8 @@ where
         .route("/dimension-values", post(handlers::save_dimension_value))
         // —— L3 物化缓存失效（权限再分配后刷新）——
         .route("/dict/{dict_code}/refresh", post(handlers::dict_refresh))
+        // —— RLS DDL 生成（防绕过纵深兜底）——
+        .route("/rls/ddl", post(handlers::rls_ddl))
         // —— 审计（谁访问了什么，敏感）——
         .route("/audit-logs", get(handlers::list_audit))
         .layer(axum::middleware::from_fn(crate::auth::require_admin))

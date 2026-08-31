@@ -96,12 +96,14 @@ pub struct RelationTuple {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum MaskType {
-    /// 完整遮蔽。
+    /// 完整遮蔽（值 → `****`）。
     Full,
     /// 部分脱敏（按 `partial_pattern`）。
     Partial,
     /// 不可逆哈希 / 令牌化。
     Hash,
+    /// 列隐藏：从投影中**移除该列**（区别于脱敏——不是 `****` 而是列不存在）。
+    Hide,
 }
 
 /// 列脱敏规则（落 `cmx_dataauth_mask_rule`）。

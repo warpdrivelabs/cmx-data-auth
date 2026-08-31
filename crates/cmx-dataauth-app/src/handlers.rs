@@ -383,6 +383,38 @@ pub async fn dict_refresh(
     ok(json!({ "dictCode": dict_code, "invalidated": n }))
 }
 
+// ─────────────────── RLS DDL 生成（防绕过纵深兜底） ───────────────────
+
+/// `POST /rls/ddl` body：`{ table, dimColumn, guc?, policyName? }` → RLS DDL 语句 + set_config 示例。
+/// 纯字符串生成（不碰 DB），供 DBA 审阅后执行。
+#[derive(Deserialize)]
+pub struct RlsReq {
+    table: String,
+    #[serde(rename = "dimColumn")]
+    dim_column: String,
+    #[serde(default)]
+    guc: Option<String>,
+    #[serde(rename = "policyName", default)]
+    policy_name: Option<String>,
+}
+
+pub async fn rls_ddl(Json(req): Json<RlsReq>) -> Result<Json<ApiResp<Value>>> {
+    let mut spec = cmx_dataauth_core::RlsSpec::new(req.table, req.dim_column);
+    if let Some(g) = req.guc {
+        spec = spec.with_guc(g);
+    }
+    if let Some(p) = req.policy_name {
+        spec = spec.with_policy_name(p);
+    }
+    let ddl = cmx_dataauth_core::rls::generate(&spec).map_err(AuthzError::business)?;
+    ok(json!({
+        "ddl": ddl,
+        "setScopeSql": cmx_dataauth_core::rls::set_scope_sql(&spec),
+        "guc": spec.guc,
+        "note": "应用层下推为主、RLS 兜底：应用须以非超级用户连库；事务开始用 setScopeSql 写入维度 scope（$1=逗号分隔ID）。GUC 未设→无行(fail-closed)。",
+    }))
+}
+
 // ─────────────────── audit / stats ───────────────────
 
 #[derive(Deserialize)]

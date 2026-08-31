@@ -20,6 +20,7 @@ pub mod expand;
 pub mod ir;
 pub mod mask;
 pub mod pdp;
+pub mod rls;
 pub mod store;
 pub mod subject;
 
@@ -38,6 +39,7 @@ pub use expand::{DimensionExpander, MockDimensionExpander, NoopExpander};
 pub use ir::{CmpOp, Constraint};
 pub use mask::{apply_masks, mask_value};
 pub use pdp::{compose, ExpandedDims, SUPERADMIN_ROLES};
+pub use rls::RlsSpec;
 pub use store::DataAuthStore;
 pub use subject::{Action, Resource, Subject};
 
