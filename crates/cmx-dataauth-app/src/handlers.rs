@@ -18,6 +18,23 @@ fn ok(v: Value) -> Result<Json<ApiResp<Value>>> {
     Ok(Json(ApiResp::ok(v)))
 }
 
+/// 记录一条配置变更审计（非致命：失败仅 warn，不阻断主流程）。
+async fn record_change(entity_type: &str, op: &str, entity_id: impl std::fmt::Display, detail: Value) {
+    let t = current_tenant();
+    let log = cmx_dataauth_core::ChangeLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        actor: current_user().unwrap_or_default(),
+        op: op.to_string(),
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+        detail,
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(e) = engine::store().append_change(&t, &log).await {
+        tracing::warn!(error = %e, "配置变更审计写入失败（非致命）");
+    }
+}
+
 // ─────────────────── decide / compile ───────────────────
 
 /// `POST /decide` body：`{ subject, resource }`。
@@ -118,13 +135,38 @@ pub async fn demo_delete_voucher(
 }
 
 // ─────────────────── policy CRUD ───────────────────
-pub async fn list_policies() -> Result<Json<ApiResp<Value>>> {
+/// 列表分页/检索通用查询：`?limit=&offset=&q=`。
+#[derive(Deserialize)]
+pub struct PageQuery {
+    #[serde(default = "default_page_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    q: Option<String>,
+}
+
+fn default_page_limit() -> i64 {
+    50
+}
+
+/// 组装分页信封 `{ items, total, limit, offset }`。
+fn page(items: Value, total: i64, p: &PageQuery) -> Value {
+    json!({ "items": items, "total": total, "limit": p.limit.clamp(1, 500), "offset": p.offset.max(0) })
+}
+
+pub async fn list_policies(Query(p): Query<PageQuery>) -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
-    let ps = engine::store()
-        .list_policies(&t)
+    let st = engine::store();
+    let items = st
+        .list_policies(&t, p.limit, p.offset, p.q.as_deref())
         .await
         .map_err(|e| AuthzError::internal(format!("列策略失败: {e}")))?;
-    ok(json!(ps))
+    let total = st
+        .count_policies(&t, p.q.as_deref())
+        .await
+        .map_err(|e| AuthzError::internal(format!("计策略数失败: {e}")))?;
+    ok(page(json!(items), total, &p))
 }
 
 pub async fn get_policy(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> {
@@ -143,6 +185,8 @@ pub async fn save_policy(Json(p): Json<PolicyDef>) -> Result<Json<ApiResp<Value>
         .save_policy(&t, &p)
         .await
         .map_err(|e| AuthzError::internal(format!("存策略失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("policy", "upsert", id, json!({ "name": p.name, "resourceKind": p.resource_kind, "action": p.action.as_str(), "effect": format!("{:?}", p.effect) })).await;
     ok(json!({ "id": id }))
 }
 
@@ -152,18 +196,25 @@ pub async fn delete_policy(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> 
         .delete_policy(&t, id)
         .await
         .map_err(|e| AuthzError::internal(format!("删策略失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("policy", "delete", id, json!({})).await;
     ok(json!({ "deleted": n }))
 }
 
 // ─────────────────── grant CRUD ───────────────────
 
-pub async fn list_grants() -> Result<Json<ApiResp<Value>>> {
+pub async fn list_grants(Query(p): Query<PageQuery>) -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
-    let gs = engine::store()
-        .list_grants(&t)
+    let st = engine::store();
+    let items = st
+        .list_grants(&t, p.limit, p.offset, p.q.as_deref())
         .await
         .map_err(|e| AuthzError::internal(format!("列授权失败: {e}")))?;
-    ok(json!(gs))
+    let total = st
+        .count_grants(&t, p.q.as_deref())
+        .await
+        .map_err(|e| AuthzError::internal(format!("计授权数失败: {e}")))?;
+    ok(page(json!(items), total, &p))
 }
 
 pub async fn save_grant(Json(g): Json<Grant>) -> Result<Json<ApiResp<Value>>> {
@@ -174,18 +225,16 @@ pub async fn save_grant(Json(g): Json<Grant>) -> Result<Json<ApiResp<Value>>> {
         .map_err(|e| AuthzError::internal(format!("存授权失败: {e}")))?;
     // L3 物化缓存精准失效：该主体在此字典维度上的可见集需重算（"重分配即刷新"）。
     crate::matcache::invalidate_for_grant(&t, g.dim_key.as_deref(), &g.subject_type, &g.subject_id);
+    crate::cache::bump_generation();
+    record_change("grant", "upsert", id, json!({ "subjectType": g.subject_type, "subjectId": g.subject_id, "dimKey": g.dim_key, "dimValues": g.dim_values })).await;
     ok(json!({ "id": id }))
 }
 
 pub async fn delete_grant(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
     let st = engine::store();
-    // 删前先取该授权的维度/主体，以便精准失效物化缓存。
-    let victim = st
-        .list_grants(&t)
-        .await
-        .ok()
-        .and_then(|gs| gs.into_iter().find(|g| g.id == id));
+    // 删前先取该授权的维度/主体，以便精准失效物化缓存（按 id 直取，避免全表扫）。
+    let victim = st.get_grant(&t, id).await.ok().flatten();
     let n = st
         .delete_grant(&t, id)
         .await
@@ -193,18 +242,25 @@ pub async fn delete_grant(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> {
     if let Some(g) = victim {
         crate::matcache::invalidate_for_grant(&t, g.dim_key.as_deref(), &g.subject_type, &g.subject_id);
     }
+    crate::cache::bump_generation();
+    record_change("grant", "delete", id, json!({})).await;
     ok(json!({ "deleted": n }))
 }
 
 // ─────────────────── relation-tuple CRUD + lookup ───────────────────
 
-pub async fn list_tuples() -> Result<Json<ApiResp<Value>>> {
+pub async fn list_tuples(Query(p): Query<PageQuery>) -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
-    let ts = engine::store()
-        .list_tuples(&t)
+    let st = engine::store();
+    let items = st
+        .list_tuples(&t, p.limit, p.offset, p.q.as_deref())
         .await
         .map_err(|e| AuthzError::internal(format!("列关系元组失败: {e}")))?;
-    ok(json!(ts))
+    let total = st
+        .count_tuples(&t, p.q.as_deref())
+        .await
+        .map_err(|e| AuthzError::internal(format!("计关系元组数失败: {e}")))?;
+    ok(page(json!(items), total, &p))
 }
 
 pub async fn save_tuple(Json(tp): Json<RelationTuple>) -> Result<Json<ApiResp<Value>>> {
@@ -213,6 +269,8 @@ pub async fn save_tuple(Json(tp): Json<RelationTuple>) -> Result<Json<ApiResp<Va
         .save_tuple(&t, &tp)
         .await
         .map_err(|e| AuthzError::internal(format!("存关系元组失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("relation_tuple", "upsert", id, json!({ "objectKind": tp.object_kind, "objectId": tp.object_id, "relation": tp.relation, "subjectKind": tp.subject_kind, "subjectId": tp.subject_id })).await;
     ok(json!({ "id": id }))
 }
 
@@ -222,6 +280,8 @@ pub async fn delete_tuple(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>>> {
         .delete_tuple(&t, id)
         .await
         .map_err(|e| AuthzError::internal(format!("删关系元组失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("relation_tuple", "delete", id, json!({})).await;
     ok(json!({ "deleted": n }))
 }
 
@@ -274,6 +334,8 @@ pub async fn save_mask_rule(Json(m): Json<MaskRule>) -> Result<Json<ApiResp<Valu
         .save_mask_rule(&t, &m)
         .await
         .map_err(|e| AuthzError::internal(format!("存脱敏规则失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("mask_rule", "upsert", id, json!({ "resourceKind": m.resource_kind, "column": m.column, "maskType": format!("{:?}", m.mask_type) })).await;
     ok(json!({ "id": id }))
 }
 
@@ -283,6 +345,8 @@ pub async fn delete_mask_rule(Path(id): Path<i64>) -> Result<Json<ApiResp<Value>
         .delete_mask_rule(&t, id)
         .await
         .map_err(|e| AuthzError::internal(format!("删脱敏规则失败: {e}")))?;
+    crate::cache::bump_generation();
+    record_change("mask_rule", "delete", id, json!({})).await;
     ok(json!({ "deleted": n }))
 }
 
@@ -306,6 +370,8 @@ pub async fn save_dimension_value(Json(dv): Json<DimensionValue>) -> Result<Json
         .map_err(|e| AuthzError::internal(format!("存维度值失败: {e}")))?;
     // 字典条目变化影响全量集与已物化集 → 失效该字典缓存。
     crate::matcache::invalidate(&t, &dv.dim_key, None);
+    crate::cache::bump_generation();
+    record_change("dimension_value", "upsert", format!("{}:{}", dv.dim_key, dv.dim_value), json!({ "dimKey": dv.dim_key, "dimValue": dv.dim_value, "parentValue": dv.parent_value })).await;
     ok(json!({ "ok": true }))
 }
 
@@ -436,13 +502,138 @@ pub async fn list_audit(Query(q): Query<AuditQuery>) -> Result<Json<ApiResp<Valu
     ok(json!(logs))
 }
 
+/// `POST /audit-logs/prune?beforeDays=90` —— 清理超保留期的审计（TTL）。
+#[derive(Deserialize)]
+pub struct PruneQuery {
+    #[serde(rename = "beforeDays", default = "default_retention")]
+    before_days: i64,
+}
+
+fn default_retention() -> i64 {
+    90
+}
+
+pub async fn prune_audit(Query(q): Query<PruneQuery>) -> Result<Json<ApiResp<Value>>> {
+    let t = current_tenant();
+    let days = q.before_days.max(0);
+    let before = chrono::Utc::now() - chrono::Duration::days(days);
+    let n = engine::store()
+        .prune_audit(&t, before)
+        .await
+        .map_err(|e| AuthzError::internal(format!("清理审计失败: {e}")))?;
+    ok(json!({ "beforeDays": days, "prunedBefore": before.to_rfc3339(), "deleted": n }))
+}
+
+/// `GET /change-logs?limit=100` —— 配置变更审计（谁改了哪条策略/授权/…，#21）。
+pub async fn list_changes(Query(q): Query<AuditQuery>) -> Result<Json<ApiResp<Value>>> {
+    let t = current_tenant();
+    let logs = engine::store()
+        .list_changes(&t, q.limit)
+        .await
+        .map_err(|e| AuthzError::internal(format!("列变更审计失败: {e}")))?;
+    ok(json!(logs))
+}
+
+/// `POST /explain` body：`{ subject, resource }` → 决策 + 人类可读解释（#19）。
+pub async fn explain(Json(req): Json<DecideReq>) -> Result<Json<ApiResp<Value>>> {
+    let d = engine::decide(&req.subject, &req.resource).await?;
+    let mut reasons: Vec<String> = Vec::new();
+    reasons.push(format!("最终效果：{:?}", d.effect));
+    if d.trace.matched_policies.is_empty() {
+        reasons.push("无匹配策略 → fail-closed 拒绝".into());
+    } else {
+        reasons.push(format!("命中策略：{}", d.trace.matched_policies.join("、")));
+    }
+    for (k, v) in &d.trace.expanded_dims {
+        reasons.push(format!("维度 {k} 展开为 {} 个值", v.len()));
+    }
+    if !d.obligations.is_empty() {
+        let cols: Vec<String> = d
+            .obligations
+            .iter()
+            .map(|o| format!("{}({:?})", o.column, o.mask_type))
+            .collect();
+        reasons.push(format!("脱敏义务：{}", cols.join("、")));
+    }
+    reasons.extend(d.trace.notes.iter().cloned());
+    ok(json!({ "decision": d, "explanation": reasons }))
+}
+
+/// `GET /policies/overlap?resourceKind=&action=read` —— 策略重叠/冲突分析（#19）。
+#[derive(Deserialize)]
+pub struct OverlapQuery {
+    #[serde(rename = "resourceKind")]
+    resource_kind: String,
+    #[serde(default = "default_action")]
+    action: String,
+}
+
+fn default_action() -> String {
+    "read".to_string()
+}
+
+pub async fn policy_overlap(Query(q): Query<OverlapQuery>) -> Result<Json<ApiResp<Value>>> {
+    let t = current_tenant();
+    // 取该资源+动作的全部策略（大页足够，策略量小）。
+    let all = engine::store()
+        .list_policies(&t, 500, 0, None)
+        .await
+        .map_err(|e| AuthzError::internal(format!("列策略失败: {e}")))?;
+    let matched: Vec<&PolicyDef> = all
+        .iter()
+        .filter(|p| p.resource_kind == q.resource_kind && p.action.as_str() == q.action)
+        .collect();
+    use cmx_dataauth_core::Effect;
+    let permits = matched.iter().filter(|p| p.effect == Effect::Permit).count();
+    let denies = matched.iter().filter(|p| p.effect == Effect::Deny).count();
+
+    let mut findings: Vec<String> = Vec::new();
+    if permits == 0 {
+        findings.push("无放行策略 → 该资源恒拒绝（fail-closed）".into());
+    }
+    if permits > 1 {
+        findings.push(format!("{permits} 条放行策略取并（可见集为各自之并）"));
+    }
+    if denies > 0 {
+        findings.push(format!("{denies} 条 Deny 策略扣除行集"));
+    }
+    // Deny 约束为常量 True → 拒全部（盖过所有 permit）。
+    for p in &matched {
+        if p.effect == Effect::Deny && p.constraint_tpl == json!({"kind":"true"}) {
+            findings.push(format!("策略「{}」Deny 约束=True → 拒全部（盖过所有放行）", p.name));
+        }
+    }
+    // 重复约束（同 effect 下完全相同的 constraint_tpl）。
+    let mut seen: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for p in &matched {
+        let k = format!("{:?}|{}", p.effect, p.constraint_tpl);
+        seen.entry(k).or_default().push(p.name.clone());
+    }
+    for names in seen.values() {
+        if names.len() > 1 {
+            findings.push(format!("重复约束：{}（可合并）", names.join("、")));
+        }
+    }
+    if findings.is_empty() {
+        findings.push("未发现明显重叠/冲突".into());
+    }
+    ok(json!({
+        "resourceKind": q.resource_kind,
+        "action": q.action,
+        "policyCount": matched.len(),
+        "permits": permits,
+        "denies": denies,
+        "findings": findings,
+    }))
+}
+
 /// `GET /stats` —— 大盘聚合（策略/授权/元组数量 + 最近审计条数）。
 pub async fn stats() -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
     let st = engine::store();
-    let policies = st.list_policies(&t).await.map(|v| v.len()).unwrap_or(0);
-    let grants = st.list_grants(&t).await.map(|v| v.len()).unwrap_or(0);
-    let tuples = st.list_tuples(&t).await.map(|v| v.len()).unwrap_or(0);
+    let policies = st.count_policies(&t, None).await.unwrap_or(0);
+    let grants = st.count_grants(&t, None).await.unwrap_or(0);
+    let tuples = st.count_tuples(&t, None).await.unwrap_or(0);
     let recent_audit = st.list_audit(&t, 20).await.map(|v| v.len()).unwrap_or(0);
     ok(json!({
         "policies": policies,
@@ -450,5 +641,7 @@ pub async fn stats() -> Result<Json<ApiResp<Value>>> {
         "tuples": tuples,
         "recentAudit": recent_audit,
         "matCacheEntries": crate::matcache::cache_size(),
+        "decideCacheEntries": crate::cache::decide_cache_size(),
+        "descCacheEntries": crate::cache::desc_cache_size(),
     }))
 }

@@ -4,6 +4,7 @@
 //! （独立壳 `cmx-dataauth-server` 用 `::<()>()`；未来平台壳可 `::<CmxAppState>()`）。
 
 pub mod auth;
+pub mod cache;
 pub mod dashboard;
 pub mod engine;
 pub mod handlers;
@@ -119,6 +120,11 @@ where
         .route("/rls/ddl", post(handlers::rls_ddl))
         // —— 审计（谁访问了什么，敏感）——
         .route("/audit-logs", get(handlers::list_audit))
+        .route("/audit-logs/prune", post(handlers::prune_audit))
+        // —— 治理：配置变更审计 · 决策解释 · 策略重叠分析 ——
+        .route("/change-logs", get(handlers::list_changes))
+        .route("/explain", post(handlers::explain))
+        .route("/policies/overlap", get(handlers::policy_overlap))
         .layer(axum::middleware::from_fn(crate::auth::require_admin))
 }
 

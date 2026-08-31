@@ -53,6 +53,12 @@ pub struct PolicyDef {
     /// （`True`=拒全部、`False`=不拒、谓词=拒该子集），最终可见 = 放行 AND NOT(拒绝并)。
     #[serde(default)]
     pub effect: Effect,
+    /// 生效起始（含）；None = 立即生效。求值热路径按 `now()` 过滤未生效/已过期策略。
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    /// 生效截止（含）；None = 永久有效。
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 /// 授权：把策略绑到主体 + 维度值集（落 `cmx_dataauth_grant`）。
@@ -73,6 +79,12 @@ pub struct Grant {
     pub dim_values: Vec<Value>,
     #[serde(default = "default_true")]
     pub inherit: bool,
+    /// 生效起始（含）；None = 立即生效。求值热路径按 `now()` 过滤未生效/已过期授权。
+    #[serde(default)]
+    pub valid_from: Option<DateTime<Utc>>,
+    /// 生效截止（含）；None = 永久有效。
+    #[serde(default)]
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 fn default_true() -> bool {
@@ -154,5 +166,29 @@ pub struct AuditLog {
     pub constraint_json: Value,
     #[serde(default)]
     pub backend: Option<String>,
+    /// 主体上下文快照：`{roles, orgs, posts, dims}`——可解释性/取证用。
+    #[serde(default)]
+    pub subject_ctx: Value,
+    /// 脱敏义务快照（哪些列被脱敏/隐藏）。
+    #[serde(default)]
+    pub obligations: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 配置变更审计（落 `cmx_dataauth_change_log`）：谁在何时改了哪条配置。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeLog {
+    pub id: String,
+    /// 变更发起者（当前用户；off 模式为空）。
+    pub actor: String,
+    /// `upsert` | `delete`。
+    pub op: String,
+    /// `policy` | `grant` | `mask_rule` | `relation_tuple` | `dimension_value`。
+    pub entity_type: String,
+    pub entity_id: String,
+    /// 变更摘要（如名称/主体/维度等关键字段，非全量 payload）。
+    #[serde(default)]
+    pub detail: Value,
     pub created_at: DateTime<Utc>,
 }

@@ -86,6 +86,7 @@ DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret ./dataauth-auth.sh
 - **priority**：只决定求值/编译顺序（高优先条件在生成 SQL 中靠前）与 trace 可读性，**不做覆盖裁决**；需要"高优先直接拒绝"
   用一条 `deny` 策略（约束 `True`）表达。
 - **层级继承**：`grant.inherit=true`（默认）授本节点 + 全部子孙；`false` 只授本节点。
+- **生效期**：policy/grant 可选 `validFrom`/`validTo`；求值热路径按 `now()` 过滤未生效/已过期（管理面 list/get 不过滤，可见全部）。
 - **列脱敏/隐藏**：`mask_rule.mask_type` ∈ `FULL` | `PARTIAL` | `HASH` | `HIDE`。前三种改呈现值；`HIDE` 从投影**移除该列**
   （`****` ≠ 列不可见）。`DataScope::hidden_columns()` 供业务 handler 从 SELECT 省略隐藏列。
 - **ReBAC 多跳**：`lookup_resources` 用 `WITH RECURSIVE` 求主体 userset 闭包（用户 → 所属 `group` → 嵌套组，沿
@@ -94,6 +95,9 @@ DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret ./dataauth-auth.sh
   （ENABLE/FORCE RLS + 按会话 GUC 过滤维度列，GUC 未设→无行 fail-closed）。应用以**非超级用户**连库、事务开始
   `set_config('dataauth.<table>_scope', ids, true)` 写入 scope，则即便调用方漏拼 WHERE，DB 层仍拦截。维度级粗兜底，
   完整残差仍靠应用层。
+- **L1 缓存（进程内，读多写少）**：`decide` 决策缓存（`DATAAUTH_DECIDE_CACHE_TTL_SECS`，**默认 0=关闭**，命中仍写审计）
+  + `descendants` 展开记忆（`DATAAUTH_DESC_CACHE_TTL_SECS`，默认 60s）。**失效**：任一配置写 bump 全局代际 + 清空缓存
+  （fail-fresh，撤销即失效，无陈旧放行）；TTL 兜底多实例。stats 暴露 `decideCacheEntries`/`descCacheEntries`。生产可换 Redis。
 
 ## 核心端点（`/api/dataauth/v1/*`）
 
@@ -104,9 +108,11 @@ DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret ./dataauth-auth.sh
 - `DELETE /demo/vouchers/{id}` — **写/删侧演示**（Action::Delete）：把 `DataScope` 拼进 DELETE（scope 参数在前、自有参数续号）
 - `GET /dict/{dictCode}/permitted[?userId=&roles=]` — **L3 物化缓存**：直取主体在该字典的可见条目
 - `POST /dict/{dictCode}/refresh` — 失效该字典物化缓存（body 可选 `{subjectType, subjectId}` 精准失效）
-- CRUD（管理面，jwt/api-key 需管理员角色）：`/policies`（`source` ∈ `inline`|`decisionTable`）`/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
+- CRUD（管理面，jwt/api-key 需管理员角色）：`/policies` `/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
+  —— 列表支持分页/检索 `?limit=&offset=&q=`，返回 `{items, total, limit, offset}`
 - `POST /rls/ddl` — 生成 PG RLS 兜底 DDL（防绕过纵深）
-- `/audit-logs` · `/stats` · 根 `/` 监控大盘 · `/_mon` 技术监控
+- 治理：`POST /explain`（决策解释）· `GET /policies/overlap?resourceKind=&action=`（策略重叠/冲突分析）· `GET /change-logs`（配置变更审计）
+- `/audit-logs`（含 `subjectCtx`/`obligations` 上下文）· `POST /audit-logs/prune?beforeDays=90`（保留期清理）· `/stats` · 根 `/` 监控大盘 · `/_mon` 技术监控
 
 ### L3 物化权限集缓存（空间换时间）
 
@@ -144,8 +150,10 @@ POST /compile { ..., backend:"sql" }
 - `cargo build --workspace` ✓（离线 aliyun 镜像）
 - `cargo test --workspace` ✓ 47 单测（1 ignored；含 inherit / 条件 Deny / Deny-all / ORG 主体 / 列隐藏 / RLS 生成 回归）
 - `cargo clippy --workspace` ✓ 0 警告
-- 真机启动 + `dataauth.sh` 端到端 ✓ 37/37（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC 单跳+**多跳组成员** /
-  enforce 内存过滤+脱敏 / **列隐藏 HIDE** / D3 决策表源 / L3 物化缓存 / **inherit=false** / **ORG 主体** / **条件 Deny** / **RLS DDL 生成**）
+- 真机启动 + `dataauth.sh` 端到端 ✓ 59/59（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC 单跳+**多跳组成员** /
+  enforce 内存过滤+脱敏 / **列隐藏 HIDE** / D3 决策表源 / L3 物化缓存 / **inherit=false** / **ORG 主体** / **条件 Deny** /
+  **RLS DDL 生成** / **列表分页检索** / **审计上下文** / **审计 TTL 清理** / **L1 decide+展开缓存** / **变更审计** / **决策解释** /
+  **策略重叠分析** / **生效期 valid_from/to**）
 - 认证/管理面 `dataauth-auth.sh`（jwt 模式）✓ 10/10（**#1 管理面 403/200 · #2 exp/密钥/无令牌 401 · #4 删侧 scoped DELETE + 无权 403**）
 
 ## 非目标（后续）

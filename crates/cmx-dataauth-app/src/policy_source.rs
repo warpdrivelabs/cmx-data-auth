@@ -126,7 +126,8 @@ mod tests {
             constraint_tpl: region_table(),
             priority: 0,
             effect: cmx_dataauth_core::Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let out = resolve_policy(&p, &subj());
         assert_eq!(out.source, PolicySource::Inline);
         assert_eq!(
@@ -148,7 +149,8 @@ mod tests {
             constraint_tpl: region_table(),
             priority: 0,
             effect: cmx_dataauth_core::Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let out = resolve_policy(&p, &s);
         assert_eq!(out.constraint_tpl, json!({"kind":"false"}));
     }
@@ -164,7 +166,8 @@ mod tests {
             constraint_tpl: json!({"kind":"true"}),
             priority: 0,
             effect: cmx_dataauth_core::Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let out = resolve_policy(&p, &subj());
         assert_eq!(out.constraint_tpl, json!({"kind":"true"}));
     }

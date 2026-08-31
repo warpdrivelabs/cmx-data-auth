@@ -47,6 +47,12 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
     };
     let st = store();
 
+    // L1 决策缓存（#12，默认关闭）：命中直接返回——但**仍写审计**，不漏留痕。
+    if let Some(d) = crate::cache::decide_get(&tenant, subject, resource) {
+        write_audit(&st, &tenant, subject, resource, &d).await;
+        return Ok(d);
+    }
+
     // ① 装匹配策略。
     let policies: Vec<PolicyDef> = st
         .load_policies(&tenant, &resource.kind, resource.action.as_str())
@@ -92,10 +98,17 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
             if expanded.contains_key(&key) {
                 continue;
             }
-            let vals = ex
-                .descendants(&tenant, dim_key, &root_s)
-                .await
-                .map_err(|e| AuthzError::internal(format!("维度展开失败: {e}")))?;
+            // L1 展开记忆（#15）：命中免递归；否则展开并落缓存。
+            let vals = if let Some(v) = crate::cache::desc_get(&tenant, dim_key, &root_s) {
+                v
+            } else {
+                let v = ex
+                    .descendants(&tenant, dim_key, &root_s)
+                    .await
+                    .map_err(|e| AuthzError::internal(format!("维度展开失败: {e}")))?;
+                crate::cache::desc_put(&tenant, dim_key, &root_s, &v);
+                v
+            };
             expanded.insert(key, vals.into_iter().map(Value::String).collect());
         }
     }
@@ -117,23 +130,42 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
         decision.obligations = build_obligations(&st, &tenant, resource, subject).await?;
     }
 
-    // ⑦ 审计（非致命）。
+    // ⑦ 落决策缓存 + 审计（非致命）。
+    crate::cache::decide_put(&tenant, subject, resource, &decision);
+    write_audit(&st, &tenant, subject, resource, &decision).await;
+
+    Ok(decision)
+}
+
+/// 写决策审计（非致命）。缓存命中与新算路径共用，确保每次访问都留痕。
+async fn write_audit(
+    st: &PgDataAuthStore,
+    tenant: &str,
+    subject: &Subject,
+    resource: &Resource,
+    decision: &Decision,
+) {
     let audit = cmx_dataauth_core::AuditLog {
         id: uuid::Uuid::new_v4().to_string(),
-        tenant: tenant.clone(),
+        tenant: tenant.to_string(),
         user_id: subject.user_id.clone(),
         resource_kind: resource.kind.clone(),
         action: resource.action.as_str().to_string(),
         effect: format!("{:?}", decision.effect),
         constraint_json: serde_json::to_value(&decision.constraint).unwrap_or(Value::Null),
         backend: None,
+        subject_ctx: json!({
+            "roles": subject.roles,
+            "orgs": subject.orgs,
+            "posts": subject.posts,
+            "dims": subject.dims,
+        }),
+        obligations: serde_json::to_value(&decision.obligations).unwrap_or(Value::Null),
         created_at: Utc::now(),
     };
-    if let Err(e) = st.append_audit(&tenant, &audit).await {
+    if let Err(e) = st.append_audit(tenant, &audit).await {
         tracing::warn!(error = %e, "决策审计写入失败（非致命）");
     }
-
-    Ok(decision)
 }
 
 /// 递归把 `Relation{field,rel,subject}` 解析成 `In{field, lookup_resources(...)}`。

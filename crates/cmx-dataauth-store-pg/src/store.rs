@@ -10,8 +10,8 @@ use cmx_core::model::cell::DataValue;
 use cmx_core::model::data::dataset::{DataSet, Row, Schema};
 use cmx_database_pg::{execute_sql, execute_sql_with_params, query_sql_with_params, SqlParams};
 use cmx_dataauth_core::{
-    AuditLog, DataAuthStore, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef,
-    PolicySource, RelationTuple, StoreError, StoreResult,
+    AuditLog, ChangeLog, DataAuthStore, DimensionValue, Effect, Grant, MaskRule, MaskType,
+    PolicyDef, PolicySource, RelationTuple, StoreError, StoreResult,
 };
 use serde_json::Value;
 
@@ -63,22 +63,52 @@ impl PgDataAuthStore {
 impl DataAuthStore for PgDataAuthStore {
     // ─────────────────── 策略 ───────────────────
 
-    async fn list_policies(&self, _tenant: &str) -> StoreResult<Vec<PolicyDef>> {
-        let ds = self
-            .query(
-                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
-                 FROM cmx_dataauth_policy ORDER BY priority DESC, id",
-                vec![],
-                "dataauth_policy_list",
-            )
-            .await?;
+    async fn list_policies(
+        &self,
+        _tenant: &str,
+        limit: i64,
+        offset: i64,
+        q: Option<&str>,
+    ) -> StoreResult<Vec<PolicyDef>> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE name ILIKE $1".to_string();
+        }
+        let li = params.len() + 1;
+        params.push(DataValue::Int(limit.clamp(1, 500)));
+        params.push(DataValue::Int(offset.max(0)));
+        let sql = format!(
+            "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect, valid_from, valid_to \
+             FROM cmx_dataauth_policy{where_sql} ORDER BY priority DESC, id LIMIT ${} OFFSET ${}",
+            li,
+            li + 1
+        );
+        let ds = self.query(&sql, params, "dataauth_policy_list").await?;
         rows_to_policies(&ds)
+    }
+
+    async fn count_policies(&self, _tenant: &str, q: Option<&str>) -> StoreResult<i64> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE name ILIKE $1".to_string();
+        }
+        let sql = format!("SELECT COUNT(*)::bigint AS n FROM cmx_dataauth_policy{where_sql}");
+        let ds = self.query(&sql, params, "dataauth_policy_count").await?;
+        Ok(ds
+            .iter()
+            .next()
+            .map(|r| get_i64(r, ds.schema.as_ref(), "n"))
+            .unwrap_or(0))
     }
 
     async fn get_policy(&self, _tenant: &str, id: i64) -> StoreResult<Option<PolicyDef>> {
         let ds = self
             .query(
-                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
+                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect, valid_from, valid_to \
                  FROM cmx_dataauth_policy WHERE id = $1",
                 vec![DataValue::Int(id)],
                 "dataauth_policy_one",
@@ -95,9 +125,11 @@ impl DataAuthStore for PgDataAuthStore {
     ) -> StoreResult<Vec<PolicyDef>> {
         let ds = self
             .query(
-                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect \
+                "SELECT id, name, resource_kind, action, source, constraint_json, priority, effect, valid_from, valid_to \
                  FROM cmx_dataauth_policy \
                  WHERE enabled = TRUE AND resource_kind = $1 AND action = $2 \
+                 AND (valid_from IS NULL OR valid_from <= now()) \
+                 AND (valid_to IS NULL OR valid_to >= now()) \
                  ORDER BY priority DESC, id",
                 vec![
                     DataValue::String(resource_kind.to_string()),
@@ -117,8 +149,8 @@ impl DataAuthStore for PgDataAuthStore {
         if p.id == 0 {
             self.insert_returning_id(
                 "INSERT INTO cmx_dataauth_policy \
-                 (name, resource_kind, action, source, constraint_json, priority, effect, enabled, created_at, updated_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$8) RETURNING id",
+                 (name, resource_kind, action, source, constraint_json, priority, effect, enabled, valid_from, valid_to, created_at, updated_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$9,$10,$10) RETURNING id",
                 vec![
                     DataValue::String(p.name.clone()),
                     DataValue::String(p.resource_kind.clone()),
@@ -127,6 +159,8 @@ impl DataAuthStore for PgDataAuthStore {
                     cj,
                     DataValue::Int(p.priority as i64),
                     DataValue::String(eff),
+                    opt_ts(&p.valid_from),
+                    opt_ts(&p.valid_to),
                     DataValue::DateTime(now),
                 ],
             )
@@ -134,7 +168,7 @@ impl DataAuthStore for PgDataAuthStore {
         } else {
             self.exec(
                 "UPDATE cmx_dataauth_policy SET name=$2, resource_kind=$3, action=$4, source=$5, \
-                 constraint_json=$6, priority=$7, effect=$8, updated_at=$9 WHERE id=$1",
+                 constraint_json=$6, priority=$7, effect=$8, valid_from=$9, valid_to=$10, updated_at=$11 WHERE id=$1",
                 vec![
                     DataValue::Int(p.id),
                     DataValue::String(p.name.clone()),
@@ -144,6 +178,8 @@ impl DataAuthStore for PgDataAuthStore {
                     cj,
                     DataValue::Int(p.priority as i64),
                     DataValue::String(eff),
+                    opt_ts(&p.valid_from),
+                    opt_ts(&p.valid_to),
                     DataValue::DateTime(now),
                 ],
             )
@@ -162,16 +198,58 @@ impl DataAuthStore for PgDataAuthStore {
 
     // ─────────────────── 授权 ───────────────────
 
-    async fn list_grants(&self, _tenant: &str) -> StoreResult<Vec<Grant>> {
+    async fn list_grants(
+        &self,
+        _tenant: &str,
+        limit: i64,
+        offset: i64,
+        q: Option<&str>,
+    ) -> StoreResult<Vec<Grant>> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE subject_id ILIKE $1".to_string();
+        }
+        let li = params.len() + 1;
+        params.push(DataValue::Int(limit.clamp(1, 500)));
+        params.push(DataValue::Int(offset.max(0)));
+        let sql = format!(
+            "SELECT id, policy_id, subject_type, subject_id, dim_key, dim_values, inherit, valid_from, valid_to \
+             FROM cmx_dataauth_grant{where_sql} ORDER BY id LIMIT ${} OFFSET ${}",
+            li,
+            li + 1
+        );
+        let ds = self.query(&sql, params, "dataauth_grant_list").await?;
+        rows_to_grants(&ds)
+    }
+
+    async fn count_grants(&self, _tenant: &str, q: Option<&str>) -> StoreResult<i64> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE subject_id ILIKE $1".to_string();
+        }
+        let sql = format!("SELECT COUNT(*)::bigint AS n FROM cmx_dataauth_grant{where_sql}");
+        let ds = self.query(&sql, params, "dataauth_grant_count").await?;
+        Ok(ds
+            .iter()
+            .next()
+            .map(|r| get_i64(r, ds.schema.as_ref(), "n"))
+            .unwrap_or(0))
+    }
+
+    async fn get_grant(&self, _tenant: &str, id: i64) -> StoreResult<Option<Grant>> {
         let ds = self
             .query(
-                "SELECT id, policy_id, subject_type, subject_id, dim_key, dim_values, inherit \
-                 FROM cmx_dataauth_grant ORDER BY id",
-                vec![],
-                "dataauth_grant_list",
+                "SELECT id, policy_id, subject_type, subject_id, dim_key, dim_values, inherit, valid_from, valid_to \
+                 FROM cmx_dataauth_grant WHERE id = $1",
+                vec![DataValue::Int(id)],
+                "dataauth_grant_one",
             )
             .await?;
-        rows_to_grants(&ds)
+        Ok(rows_to_grants(&ds)?.into_iter().next())
     }
 
     async fn load_grants(
@@ -193,8 +271,10 @@ impl DataAuthStore for PgDataAuthStore {
             n += 2;
         }
         let sql = format!(
-            "SELECT id, policy_id, subject_type, subject_id, dim_key, dim_values, inherit \
-             FROM cmx_dataauth_grant WHERE {}",
+            "SELECT id, policy_id, subject_type, subject_id, dim_key, dim_values, inherit, valid_from, valid_to \
+             FROM cmx_dataauth_grant WHERE ({}) \
+             AND (valid_from IS NULL OR valid_from <= now()) \
+             AND (valid_to IS NULL OR valid_to >= now())",
             clauses.join(" OR ")
         );
         let ds = self.query(&sql, params, "dataauth_grant_load").await?;
@@ -207,8 +287,8 @@ impl DataAuthStore for PgDataAuthStore {
         if g.id == 0 {
             self.insert_returning_id(
                 "INSERT INTO cmx_dataauth_grant \
-                 (policy_id, subject_type, subject_id, dim_key, dim_values, inherit, created_at, updated_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$7) RETURNING id",
+                 (policy_id, subject_type, subject_id, dim_key, dim_values, inherit, valid_from, valid_to, created_at, updated_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9) RETURNING id",
                 vec![
                     DataValue::Int(g.policy_id),
                     DataValue::String(g.subject_type.clone()),
@@ -216,6 +296,8 @@ impl DataAuthStore for PgDataAuthStore {
                     opt_str(&g.dim_key),
                     dv,
                     DataValue::Bool(g.inherit),
+                    opt_ts(&g.valid_from),
+                    opt_ts(&g.valid_to),
                     DataValue::DateTime(now),
                 ],
             )
@@ -223,7 +305,7 @@ impl DataAuthStore for PgDataAuthStore {
         } else {
             self.exec(
                 "UPDATE cmx_dataauth_grant SET policy_id=$2, subject_type=$3, subject_id=$4, \
-                 dim_key=$5, dim_values=$6, inherit=$7, updated_at=$8 WHERE id=$1",
+                 dim_key=$5, dim_values=$6, inherit=$7, valid_from=$8, valid_to=$9, updated_at=$10 WHERE id=$1",
                 vec![
                     DataValue::Int(g.id),
                     DataValue::Int(g.policy_id),
@@ -232,6 +314,8 @@ impl DataAuthStore for PgDataAuthStore {
                     opt_str(&g.dim_key),
                     dv,
                     DataValue::Bool(g.inherit),
+                    opt_ts(&g.valid_from),
+                    opt_ts(&g.valid_to),
                     DataValue::DateTime(now),
                 ],
             )
@@ -250,16 +334,47 @@ impl DataAuthStore for PgDataAuthStore {
 
     // ─────────────────── 关系元组（ReBAC） ───────────────────
 
-    async fn list_tuples(&self, _tenant: &str) -> StoreResult<Vec<RelationTuple>> {
-        let ds = self
-            .query(
-                "SELECT id, object_kind, object_id, relation, subject_kind, subject_id \
-                 FROM cmx_dataauth_relation_tuple ORDER BY id",
-                vec![],
-                "dataauth_tuple_list",
-            )
-            .await?;
+    async fn list_tuples(
+        &self,
+        _tenant: &str,
+        limit: i64,
+        offset: i64,
+        q: Option<&str>,
+    ) -> StoreResult<Vec<RelationTuple>> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE object_id ILIKE $1 OR subject_id ILIKE $1".to_string();
+        }
+        let li = params.len() + 1;
+        params.push(DataValue::Int(limit.clamp(1, 500)));
+        params.push(DataValue::Int(offset.max(0)));
+        let sql = format!(
+            "SELECT id, object_kind, object_id, relation, subject_kind, subject_id \
+             FROM cmx_dataauth_relation_tuple{where_sql} ORDER BY id LIMIT ${} OFFSET ${}",
+            li,
+            li + 1
+        );
+        let ds = self.query(&sql, params, "dataauth_tuple_list").await?;
         rows_to_tuples(&ds)
+    }
+
+    async fn count_tuples(&self, _tenant: &str, q: Option<&str>) -> StoreResult<i64> {
+        let mut params: Vec<DataValue> = Vec::new();
+        let mut where_sql = String::new();
+        if let Some(s) = q.filter(|s| !s.trim().is_empty()) {
+            params.push(DataValue::String(format!("%{}%", s.trim())));
+            where_sql = " WHERE object_id ILIKE $1 OR subject_id ILIKE $1".to_string();
+        }
+        let sql =
+            format!("SELECT COUNT(*)::bigint AS n FROM cmx_dataauth_relation_tuple{where_sql}");
+        let ds = self.query(&sql, params, "dataauth_tuple_count").await?;
+        Ok(ds
+            .iter()
+            .next()
+            .map(|r| get_i64(r, ds.schema.as_ref(), "n"))
+            .unwrap_or(0))
     }
 
     async fn lookup_resources(
@@ -458,8 +573,8 @@ impl DataAuthStore for PgDataAuthStore {
     async fn append_audit(&self, _tenant: &str, log: &AuditLog) -> StoreResult<()> {
         self.exec(
             "INSERT INTO cmx_dataauth_audit_log \
-             (id, user_id, resource_kind, action, effect, constraint_json, backend, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+             (id, user_id, resource_kind, action, effect, constraint_json, backend, subject_ctx, obligations, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             vec![
                 DataValue::String(log.id.clone()),
                 DataValue::String(log.user_id.clone()),
@@ -468,6 +583,8 @@ impl DataAuthStore for PgDataAuthStore {
                 DataValue::String(log.effect.clone()),
                 DataValue::Json(log.constraint_json.to_string()),
                 opt_str(&log.backend),
+                DataValue::Json(log.subject_ctx.to_string()),
+                DataValue::Json(log.obligations.to_string()),
                 DataValue::DateTime(log.created_at),
             ],
         )
@@ -475,10 +592,18 @@ impl DataAuthStore for PgDataAuthStore {
         Ok(())
     }
 
+    async fn prune_audit(&self, _tenant: &str, before: DateTime<Utc>) -> StoreResult<u64> {
+        self.exec(
+            "DELETE FROM cmx_dataauth_audit_log WHERE created_at < $1",
+            vec![DataValue::DateTime(before)],
+        )
+        .await
+    }
+
     async fn list_audit(&self, _tenant: &str, limit: i64) -> StoreResult<Vec<AuditLog>> {
         let ds = self
             .query(
-                "SELECT id, user_id, resource_kind, action, effect, constraint_json, backend, created_at \
+                "SELECT id, user_id, resource_kind, action, effect, constraint_json, backend, subject_ctx, obligations, created_at \
                  FROM cmx_dataauth_audit_log ORDER BY created_at DESC LIMIT $1",
                 vec![DataValue::Int(limit.clamp(1, 1000))],
                 "dataauth_audit_list",
@@ -496,6 +621,52 @@ impl DataAuthStore for PgDataAuthStore {
                 effect: get_opt_string(r, schema, "effect").unwrap_or_default(),
                 constraint_json: get_json(r, schema, "constraint_json").unwrap_or(Value::Null),
                 backend: get_opt_string(r, schema, "backend"),
+                subject_ctx: get_json(r, schema, "subject_ctx").unwrap_or(Value::Null),
+                obligations: get_json(r, schema, "obligations").unwrap_or(Value::Null),
+                created_at: get_opt_ts(r, schema, "created_at").unwrap_or_else(Utc::now),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn append_change(&self, _tenant: &str, log: &ChangeLog) -> StoreResult<()> {
+        self.exec(
+            "INSERT INTO cmx_dataauth_change_log \
+             (id, actor, op, entity_type, entity_id, detail, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            vec![
+                DataValue::String(log.id.clone()),
+                DataValue::String(log.actor.clone()),
+                DataValue::String(log.op.clone()),
+                DataValue::String(log.entity_type.clone()),
+                DataValue::String(log.entity_id.clone()),
+                DataValue::Json(log.detail.to_string()),
+                DataValue::DateTime(log.created_at),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn list_changes(&self, _tenant: &str, limit: i64) -> StoreResult<Vec<ChangeLog>> {
+        let ds = self
+            .query(
+                "SELECT id, actor, op, entity_type, entity_id, detail, created_at \
+                 FROM cmx_dataauth_change_log ORDER BY created_at DESC LIMIT $1",
+                vec![DataValue::Int(limit.clamp(1, 1000))],
+                "dataauth_change_list",
+            )
+            .await?;
+        let schema = ds.schema.as_ref();
+        let mut out = Vec::new();
+        for r in ds.iter() {
+            out.push(ChangeLog {
+                id: get_string(r, schema, "id")?,
+                actor: get_opt_string(r, schema, "actor").unwrap_or_default(),
+                op: get_opt_string(r, schema, "op").unwrap_or_default(),
+                entity_type: get_opt_string(r, schema, "entity_type").unwrap_or_default(),
+                entity_id: get_opt_string(r, schema, "entity_id").unwrap_or_default(),
+                detail: get_json(r, schema, "detail").unwrap_or(Value::Null),
                 created_at: get_opt_ts(r, schema, "created_at").unwrap_or_else(Utc::now),
             });
         }
@@ -518,6 +689,8 @@ fn rows_to_policies(ds: &DataSet) -> StoreResult<Vec<PolicyDef>> {
             constraint_tpl: get_json(r, schema, "constraint_json")?,
             priority: get_i64(r, schema, "priority") as i32,
             effect: parse_effect(&get_opt_string(r, schema, "effect").unwrap_or_default()),
+            valid_from: get_opt_ts(r, schema, "valid_from"),
+            valid_to: get_opt_ts(r, schema, "valid_to"),
         });
     }
     Ok(out)
@@ -539,6 +712,8 @@ fn rows_to_grants(ds: &DataSet) -> StoreResult<Vec<Grant>> {
             dim_key: get_opt_string(r, schema, "dim_key"),
             dim_values,
             inherit: get_bool(r, schema, "inherit"),
+            valid_from: get_opt_ts(r, schema, "valid_from"),
+            valid_to: get_opt_ts(r, schema, "valid_to"),
         });
     }
     Ok(out)
@@ -642,6 +817,14 @@ fn opt_str(v: &Option<String>) -> DataValue {
     match v {
         Some(s) => DataValue::String(s.clone()),
         None => DataValue::Null,
+    }
+}
+
+fn opt_ts(v: &Option<DateTime<Utc>>) -> DataValue {
+    match v {
+        Some(t) => DataValue::DateTime(*t),
+        // 可空 timestamptz 的 NULL 必须带类型标记，否则 tokio-postgres 绑定 Option<String> 与 timestamptz 冲突。
+        None => DataValue::NullTyped(cmx_core::model::cell::SqlTypeMarker::Timestamp),
     }
 }
 

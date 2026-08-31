@@ -28,8 +28,8 @@ pub use compiler::{
     ConstraintCompiler, EsCompiler, RowFilterCompiler, RowPredicate, SqlCompiler, SqlWhere,
 };
 pub use def::{
-    AuditLog, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef, PolicySource,
-    RelationTuple,
+    AuditLog, ChangeLog, DimensionValue, Effect, Grant, MaskRule, MaskType, PolicyDef,
+    PolicySource, RelationTuple,
 };
 pub use error::{
     CompileError, CompileResult, Error, ExpandError, ExpandResult, Result, StoreError, StoreResult,
@@ -342,7 +342,8 @@ mod tests {
             constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let grant = Grant {
             id: 1,
             policy_id: 1,
@@ -351,7 +352,8 @@ mod tests {
             dim_key: Some("org".into()),
             dim_values: vec![json!("1001")],
             inherit: true,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let mut expanded = ExpandedDims::new();
         expanded.insert(
             ("org".into(), "1001".into()),
@@ -384,7 +386,8 @@ mod tests {
             constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let grant = Grant {
             id: 1,
             policy_id: 1,
@@ -393,7 +396,8 @@ mod tests {
             dim_key: Some("org".into()),
             dim_values: vec![json!("1001")],
             inherit: false,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let mut expanded = ExpandedDims::new();
         expanded.insert(
             ("org".into(), "1001".into()),
@@ -424,7 +428,8 @@ mod tests {
             constraint_tpl: json!({"kind":"cmp","field":"owner","op":"eq","value":"$user"}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let grant = Grant {
             id: 1,
             policy_id: 1,
@@ -433,7 +438,8 @@ mod tests {
             dim_key: None,
             dim_values: vec![],
             inherit: true,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let subj = Subject {
             user_id: "u42".into(),
             ..Default::default()
@@ -464,7 +470,8 @@ mod tests {
             ]}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         // grant 命中主体但 dim_values 空。
         let grant = Grant {
             id: 1,
@@ -474,7 +481,8 @@ mod tests {
             dim_key: Some("org".into()),
             dim_values: vec![],
             inherit: true,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let subj = Subject {
             user_id: "u1".into(),
             ..Default::default()
@@ -496,7 +504,8 @@ mod tests {
             constraint_tpl: json!({"kind":"true"}),
             priority: 100,
             effect: Effect::Deny,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let subj = Subject {
             user_id: "u1".into(),
             ..Default::default()
@@ -517,7 +526,8 @@ mod tests {
             constraint_tpl: json!({"kind":"true"}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let deny = PolicyDef {
             id: 2,
             name: "no-big".into(),
@@ -527,7 +537,8 @@ mod tests {
             constraint_tpl: json!({"kind":"cmp","field":"amount","op":"gt","value":1000000}),
             priority: 10,
             effect: Effect::Deny,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let subj = Subject {
             user_id: "u1".into(),
             ..Default::default()
@@ -552,7 +563,8 @@ mod tests {
             constraint_tpl: json!({"kind":"in","field":"ou_id","values":["1001"]}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let deny = PolicyDef {
             id: 2,
             name: "block-all".into(),
@@ -562,7 +574,8 @@ mod tests {
             constraint_tpl: json!({"kind":"true"}),
             priority: 100,
             effect: Effect::Deny,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let subj = Subject {
             user_id: "u1".into(),
             ..Default::default()
@@ -584,7 +597,8 @@ mod tests {
             constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
             priority: 0,
             effect: Effect::Permit,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let grant = Grant {
             id: 1,
             policy_id: 1,
@@ -593,7 +607,8 @@ mod tests {
             dim_key: Some("org".into()),
             dim_values: vec![json!("1001")],
             inherit: true,
-        };
+            valid_from: None,
+            valid_to: None,        };
         let mut expanded = ExpandedDims::new();
         expanded.insert(
             ("org".into(), "1001".into()),

@@ -22,7 +22,9 @@ echo "== 0. 清理（幂等：删旧策略/授权/元组，避免跨次累积污
 del_all() { # del_all <list-path> <del-prefix>
   for id in $(curl -s "$B/$1" | python3 -c 'import sys,json
 try:
-  for x in json.load(sys.stdin).get("data") or []: print(x["id"])
+  d=json.load(sys.stdin).get("data") or {}
+  rows=d.get("items") if isinstance(d,dict) else d
+  for x in rows or []: print(x["id"])
 except Exception: pass'); do
     curl -s -XDELETE "$B/$2/$id" >/dev/null
   done
@@ -157,7 +159,7 @@ chk "华东子树 3 条" '"count":3' "$M1"
 M2=$(curl -s "$B/dict/org/permitted?roles=mc-fin")
 chk "再查缓存命中 fromCache=true" '"fromCache":true' "$M2"
 # 重分配追加华南 → save 自动失效。
-GID=$(curl -s "$B/grants" | python3 -c 'import sys,json;print([g["id"] for g in json.load(sys.stdin)["data"] if g["subjectId"]=="mc-fin"][0])')
+GID=$(curl -s "$B/grants" | python3 -c 'import sys,json;print([g["id"] for g in json.load(sys.stdin)["data"]["items"] if g["subjectId"]=="mc-fin"][0])')
 curl -s -XPOST $B/grants -H "$J" -d "{\"id\":$GID,\"policyId\":0,\"subjectType\":\"ROLE\",\"subjectId\":\"mc-fin\",\"dimKey\":\"org\",\"dimValues\":[\"1001\",\"2001\"]}" >/dev/null
 M3=$(curl -s "$B/dict/org/permitted?roles=mc-fin")
 chk "重分配后自动失效重算 fromCache=false" '"fromCache":false' "$M3"
@@ -174,6 +176,76 @@ chk "维度列过滤 (fail-closed)" "ou_id::text = ANY (string_to_array" "$RLS"
 chk "set_config 写 scope" "set_config('dataauth.voucher_scope'" "$RLS"
 RLSBAD=$(curl -s -XPOST $B/rls/ddl -H "$J" -d '{"table":"v; DROP TABLE x","dimColumn":"ou_id"}')
 chk "非法表名被拒（防注入）" "非法标识符" "$RLSBAD"
+
+echo "== 12. 列表分页/检索（P2#14）=="
+PG1=$(curl -s "$B/policies?limit=2&offset=0")
+chk "分页信封含 total" '"total":' "$PG1"
+chk "分页 limit=2 生效" '"limit":2' "$PG1"
+N=$(echo "$PG1" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]["items"]))')
+chk "本页返回 2 条" "2" "$N"
+PGQ=$(curl -s "$B/policies?q=smoke-org")
+chk "检索 q=smoke-org 命中" "smoke-org" "$PGQ"
+chk "检索 smoke-org total=1" '"total":1' "$PGQ"
+
+echo "== 13. 审计上下文（P2#20）=="
+curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"auditu","roles":["finance"],"orgs":["1001"]},"resource":{"kind":"voucher-org","action":"read","dimBindings":{"org":"ou_id"}}}' >/dev/null
+# 取该用户的审计条目（从充足窗口里筛 userId=auditu，避免同秒时间戳排序抖动）。
+AL=$(curl -s "$B/audit-logs?limit=200" | python3 -c 'import sys,json
+d=json.load(sys.stdin)["data"]
+rows=d.get("items") if isinstance(d,dict) else d
+for r in rows or []:
+  if r.get("userId")=="auditu": print(json.dumps(r,ensure_ascii=False)); break')
+chk "审计含 subjectCtx" '"subjectCtx"' "$AL"
+chk "审计记录 roles(finance)" "finance" "$AL"
+chk "审计记录 orgs(1001)" '"1001"' "$AL"
+chk "审计含 obligations 字段" '"obligations"' "$AL"
+
+echo "== 14. 审计保留期清理 TTL（P2#13）=="
+PRUNEHI=$(curl -s -XPOST "$B/audit-logs/prune?beforeDays=99999")
+chk "高保留期删 0（无超期）" '"deleted":0' "$PRUNEHI"
+PRUNE0=$(curl -s -XPOST "$B/audit-logs/prune?beforeDays=0")
+chk "beforeDays=0 返回删除条数" '"deleted":' "$PRUNE0"
+
+echo "== 15. L1 缓存：展开记忆 #15 + decide 缓存 #12 =="
+sv() { curl -s "$B/stats" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('$1',0))"; }
+DREQ='{"subject":{"userId":"u42","roles":["finance"]},"resource":{"kind":"voucher-smoke","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["owner","status"]}}'
+curl -s -XPOST $B/decide -H "$J" -d "$DREQ" >/dev/null   # 触发 org 展开 → 展开记忆填充
+D1=$(sv descCacheEntries)
+chk "展开记忆已填充(>0)" "1" "$([ "${D1:-0}" -ge 1 ] && echo 1 || echo 0)"
+curl -s -XPOST $B/dimension-values -H "$J" -d '{"dimKey":"org","dimValue":"1001","label":"华东"}' >/dev/null  # 配置写 → bump
+D2=$(sv descCacheEntries)
+chk "配置写后展开缓存清零" "1" "$([ "${D2:-0}" = "0" ] && echo 1 || echo 0)"
+curl -s -XPOST $B/decide -H "$J" -d "$DREQ" >/dev/null
+DEC=$(sv decideCacheEntries)
+if [ "${DEC:-0}" -ge 1 ]; then chk "decide 缓存已填充(>0)" "1" "1"; else echo "  ⏭ decide 缓存未启用（DATAAUTH_DECIDE_CACHE_TTL_SECS=0，默认关闭），跳过"; fi
+
+echo "== 16. 治理：变更审计 #21 + 决策解释 #19 + 策略重叠 #19 =="
+CL=$(curl -s "$B/change-logs?limit=200")
+chk "变更审计记录 policy 实体" '"entityType":"policy"' "$CL"
+chk "变更审计含 op=upsert" '"op":"upsert"' "$CL"
+EX=$(curl -s -XPOST $B/explain -H "$J" -d '{"subject":{"userId":"u42","roles":["finance"]},"resource":{"kind":"voucher-smoke","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["owner","status"]}}')
+chk "explain 含解释数组" '"explanation"' "$EX"
+chk "explain 命中策略 smoke-voucher" "smoke-voucher" "$EX"
+OV=$(curl -s "$B/policies/overlap?resourceKind=voucher-block&action=read")
+chk "overlap 检出 Deny=True 拒全部" "拒全部" "$OV"
+chk "overlap denies=1" '"denies":1' "$OV"
+
+echo "== 17. 生效期 valid_from/valid_to（P3#21b）=="
+# 过期授权：valid_to 在过去 → decide 看不到；未来策略：valid_from 在未来 → decide 看不到。
+PAST="2000-01-01T00:00:00Z"; FUTURE="2999-01-01T00:00:00Z"
+PVF=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"vf-policy","resourceKind":"voucher-vf","action":"read","effect":"permit","constraintTpl":{"kind":"in","field":"ou_id","values":["$dim:org"]}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
+# 授权已过期（valid_to 过去）
+curl -s -XPOST $B/grants -H "$J" -d "{\"policyId\":$PVF,\"subjectType\":\"USER\",\"subjectId\":\"uvf\",\"dimKey\":\"org\",\"dimValues\":[\"1001\"],\"validTo\":\"$PAST\"}" >/dev/null
+DVF=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"uvf"},"resource":{"kind":"voucher-vf","action":"read","dimBindings":{"org":"ou_id"}}}')
+chk "过期授权 → decide 拒绝" '"effect":"deny"' "$DVF"
+# 但管理面 list 仍能看到该授权（含 validTo）
+GVF=$(curl -s "$B/grants?q=uvf")
+chk "管理面 list 仍见过期授权" '"validTo"' "$GVF"
+# 未生效策略（valid_from 未来）
+curl -s -XPOST $B/policies -H "$J" -d "{\"name\":\"future-policy\",\"resourceKind\":\"voucher-fut\",\"action\":\"read\",\"effect\":\"permit\",\"validFrom\":\"$FUTURE\",\"constraintTpl\":{\"kind\":\"true\"}}" >/dev/null
+curl -s -XPOST $B/grants -H "$J" -d '{"policyId":0,"subjectType":"USER","subjectId":"ufut","dimKey":"org","dimValues":["1001"]}' >/dev/null
+DFUT=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"ufut"},"resource":{"kind":"voucher-fut","action":"read"}}')
+chk "未生效策略 → decide 拒绝" '"effect":"deny"' "$DFUT"
 
 echo
 echo "==== 通过 $pass · 失败 $fail ===="
