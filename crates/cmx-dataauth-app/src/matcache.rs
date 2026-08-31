@@ -49,6 +49,8 @@ pub async fn permitted_entries(
     dict_code: &str,
     user_id: &str,
     roles: &[String],
+    orgs: &[String],
+    posts: &[String],
 ) -> Result<Permitted, AuthzError> {
     // 超管 → 全量（物化到特殊 principal，同样享缓存）。
     if roles.iter().any(|r| SUPERADMIN_ROLES.contains(&r.as_str())) {
@@ -66,6 +68,12 @@ pub async fn permitted_entries(
     }
     for r in roles {
         principals.push(("ROLE".into(), r.clone()));
+    }
+    for o in orgs {
+        principals.push(("ORG".into(), o.clone()));
+    }
+    for p in posts {
+        principals.push(("POST".into(), p.clone()));
     }
 
     let mut all_hit = true;
@@ -154,11 +162,16 @@ async fn materialize(
             if rs == ALL {
                 return Ok(all); // 授"全部" → 全量字典。
             }
-            let desc = ex
-                .descendants(tenant, dict_code, &rs)
-                .await
-                .map_err(|e| AuthzError::internal(format!("维度展开失败: {e}")))?;
-            permitted.extend(desc);
+            if g.inherit {
+                let desc = ex
+                    .descendants(tenant, dict_code, &rs)
+                    .await
+                    .map_err(|e| AuthzError::internal(format!("维度展开失败: {e}")))?;
+                permitted.extend(desc);
+            } else {
+                // inherit=false → 只授本节点。
+                permitted.insert(rs);
+            }
         }
     }
 

@@ -371,6 +371,47 @@ mod tests {
     }
 
     #[test]
+    fn compose_inherit_false_only_self() {
+        // inherit=false：即便 expanded 里有下行闭包，也只授根节点本身（不下钻子孙）。
+        let policy = PolicyDef {
+            id: 1,
+            name: "org-scope".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
+            priority: 0,
+            effect: Effect::Permit,
+        };
+        let grant = Grant {
+            id: 1,
+            policy_id: 1,
+            subject_type: "USER".into(),
+            subject_id: "u1".into(),
+            dim_key: Some("org".into()),
+            dim_values: vec![json!("1001")],
+            inherit: false,
+        };
+        let mut expanded = ExpandedDims::new();
+        expanded.insert(
+            ("org".into(), "1001".into()),
+            vec![json!("1001"), json!("100101"), json!("100102")],
+        );
+        let subj = Subject {
+            user_id: "u1".into(),
+            ..Default::default()
+        };
+        let d = compose(&subj, &voucher_read(), &[policy], &[grant], &expanded);
+        assert_eq!(
+            d.constraint,
+            Constraint::In {
+                field: "ou_id".into(),
+                values: vec![json!("1001")], // 只有根，无 100101/100102。
+            }
+        );
+    }
+
+    #[test]
     fn compose_user_placeholder() {
         let policy = PolicyDef {
             id: 1,
@@ -442,14 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn compose_deny_policy_short_circuits() {
+    fn compose_deny_only_denies() {
+        // 只有 Deny 策略、无放行策略 → 拒绝（Deny 不单独授予可见性）。
         let deny = PolicyDef {
             id: 2,
             name: "blk".into(),
             resource_kind: "voucher".into(),
             action: Action::Read,
             source: PolicySource::Inline,
-            constraint_tpl: json!({"kind":"false"}),
+            constraint_tpl: json!({"kind":"true"}),
             priority: 100,
             effect: Effect::Deny,
         };
@@ -459,6 +501,115 @@ mod tests {
         };
         let d = compose(&subj, &voucher_read(), &[deny], &[], &ExpandedDims::new());
         assert_eq!(d.effect, DecisionEffect::Deny);
+    }
+
+    #[test]
+    fn compose_conditional_deny_subtracts_rows() {
+        // 放行全部 + Deny 谓词（amount>100万）→ 可见 = True AND NOT(amount>100万) = NOT(amount>100万)。
+        let permit = PolicyDef {
+            id: 1,
+            name: "all".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"true"}),
+            priority: 0,
+            effect: Effect::Permit,
+        };
+        let deny = PolicyDef {
+            id: 2,
+            name: "no-big".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"cmp","field":"amount","op":"gt","value":1000000}),
+            priority: 10,
+            effect: Effect::Deny,
+        };
+        let subj = Subject {
+            user_id: "u1".into(),
+            ..Default::default()
+        };
+        let d = compose(&subj, &voucher_read(), &[permit, deny], &[], &ExpandedDims::new());
+        assert_eq!(d.effect, DecisionEffect::PermitWithConstraint);
+        assert_eq!(
+            d.constraint,
+            Constraint::not(Constraint::cmp("amount", CmpOp::Gt, json!(1000000)))
+        );
+    }
+
+    #[test]
+    fn compose_deny_all_beats_permit() {
+        // Deny 约束 True（拒全部）→ permit AND NOT(True) = False → Deny。
+        let permit = PolicyDef {
+            id: 1,
+            name: "scope".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"in","field":"ou_id","values":["1001"]}),
+            priority: 0,
+            effect: Effect::Permit,
+        };
+        let deny = PolicyDef {
+            id: 2,
+            name: "block-all".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"true"}),
+            priority: 100,
+            effect: Effect::Deny,
+        };
+        let subj = Subject {
+            user_id: "u1".into(),
+            ..Default::default()
+        };
+        let d = compose(&subj, &voucher_read(), &[permit, deny], &[], &ExpandedDims::new());
+        assert_eq!(d.effect, DecisionEffect::Deny);
+        assert_eq!(d.constraint, Constraint::False);
+    }
+
+    #[test]
+    fn compose_org_subject_hit() {
+        // ORG 主体：grant(subject_type=ORG,1001) 命中 subject.orgs=[1001]。
+        let policy = PolicyDef {
+            id: 1,
+            name: "org-scope".into(),
+            resource_kind: "voucher".into(),
+            action: Action::Read,
+            source: PolicySource::Inline,
+            constraint_tpl: json!({"kind":"in","field":"ou_id","values":["$dim:org"]}),
+            priority: 0,
+            effect: Effect::Permit,
+        };
+        let grant = Grant {
+            id: 1,
+            policy_id: 1,
+            subject_type: "ORG".into(),
+            subject_id: "1001".into(),
+            dim_key: Some("org".into()),
+            dim_values: vec![json!("1001")],
+            inherit: true,
+        };
+        let mut expanded = ExpandedDims::new();
+        expanded.insert(
+            ("org".into(), "1001".into()),
+            vec![json!("1001"), json!("100101")],
+        );
+        let subj = Subject {
+            user_id: "u1".into(),
+            orgs: vec!["1001".into()],
+            ..Default::default()
+        };
+        let d = compose(&subj, &voucher_read(), &[policy], &[grant], &expanded);
+        assert_eq!(
+            d.constraint,
+            Constraint::In {
+                field: "ou_id".into(),
+                values: vec![json!("1001"), json!("100101")],
+            }
+        );
     }
 
     // ————————————————————— 维度展开 —————————————————————

@@ -50,6 +50,14 @@ C=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"u42","roles":["f
 chk "WHERE 含 ou_id IN" "ou_id IN (\$1, \$2, \$3)" "$C"
 chk "参数含 public" '"public"' "$C"
 
+echo "== 4b. inherit=false 只授本节点（P0#3 回归）=="
+PIH=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"smoke-inherit","resourceKind":"voucher-inherit","action":"read","effect":"permit","constraintTpl":{"kind":"in","field":"ou_id","values":["$dim:org"]}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
+curl -s -XPOST $B/grants -H "$J" -d "{\"policyId\":$PIH,\"subjectType\":\"USER\",\"subjectId\":\"u_inh\",\"dimKey\":\"org\",\"dimValues\":[\"1001\"],\"inherit\":false}" >/dev/null
+CIH=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"u_inh"},"resource":{"kind":"voucher-inherit","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["ou_id"]},"backend":"sql"}')
+# 只应含单占位（仅根 1001）；若 inherit 被忽略会展开成 ou_id IN ($1, $2, $3)。
+chk "inherit=false 编译只含单占位（仅根）" 'ou_id IN ($1)' "$CIH"
+chk "inherit=false 参数只有 1001" '"params":["1001"]' "$CIH"
+
 echo "== 5. DENY 无授权 u99 =="
 D2=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"u99","roles":["guest"]},"resource":{"kind":"voucher-smoke","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["owner","status"]}}')
 chk "effect=deny" '"effect":"deny"' "$D2"
@@ -87,17 +95,26 @@ chk "east → 决策表输出 org 展开 SQL" "ou_id IN" "$DEAST"
 DWEST=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"dte","attrs":{"region":"west"}},"resource":{"kind":"dt-smoke","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["ou_id"]}}')
 chk "west → 决策表输出 false → Deny" '"effect":"deny"' "$DWEST"
 
-echo "== 9. D6 PEP 中间件自动注入（权限无感 handler，需 JWT 有 user）=="
-# 生成 HS256 token（sub=biz1）；本冒烟脚本默认 off 模式，此步须服务以 jwt 模式起才有意义。
-if [[ "${DATAAUTH_AUTH_MODE:-off}" == "jwt" ]]; then
-  PP=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"smoke-pep","resourceKind":"voucher","action":"read","effect":"permit","constraintTpl":{"kind":"in","field":"ou_id","values":["$dim:org"]}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
-  curl -s -XPOST $B/grants -H "$J" -d "{\"policyId\":$PP,\"subjectType\":\"USER\",\"subjectId\":\"biz1\",\"dimKey\":\"org\",\"dimValues\":[\"1001\"]}" >/dev/null
-  TOK=$(python3 -c 'import hmac,hashlib,base64,json;b=lambda x:base64.urlsafe_b64encode(x).rstrip(b"=").decode();h=b(json.dumps({"alg":"HS256","typ":"JWT"}).encode());p=b(json.dumps({"sub":"biz1","tenant":"default","roles":[]}).encode());s=b(hmac.new(b"'"${DATAAUTH_JWT_SECRET:-test-secret}"'",f"{h}.{p}".encode(),hashlib.sha256).digest());print(f"{h}.{p}.{s}")')
-  DEMO=$(curl -s "$B/demo/vouchers" -H "Authorization: Bearer $TOK")
-  chk "handler 收到注入的 scoped WHERE" "WHERE ou_id IN" "$DEMO"
-else
-  echo "  ⏭  跳过（需 DATAAUTH_AUTH_MODE=jwt 起服务；off 模式无 user 身份）"
-fi
+echo "== 8b. ORG 主体授权（P1#9）=="
+PORG=$(curl -s -XPOST $B/policies -H "$J" -d '{"name":"smoke-org","resourceKind":"voucher-org","action":"read","effect":"permit","constraintTpl":{"kind":"in","field":"ou_id","values":["$dim:org"]}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["id"])')
+curl -s -XPOST $B/grants -H "$J" -d "{\"policyId\":$PORG,\"subjectType\":\"ORG\",\"subjectId\":\"1001\",\"dimKey\":\"org\",\"dimValues\":[\"1001\"]}" >/dev/null
+CORG=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"anyone","orgs":["1001"]},"resource":{"kind":"voucher-org","action":"read","dimBindings":{"org":"ou_id"},"rowCtx":["ou_id"]},"backend":"sql"}')
+chk "ORG 主体命中 → ou_id IN 子树" "ou_id IN (\$1, \$2, \$3)" "$CORG"
+chk "ORG 展开含子孙 100101" '"100101"' "$CORG"
+
+echo "== 8c. 条件 Deny 扣除行集（P1#7）=="
+curl -s -XPOST $B/policies -H "$J" -d '{"name":"cd-permit","resourceKind":"voucher-cd","action":"read","effect":"permit","constraintTpl":{"kind":"true"}}' >/dev/null
+curl -s -XPOST $B/policies -H "$J" -d '{"name":"cd-deny","resourceKind":"voucher-cd","action":"read","effect":"deny","constraintTpl":{"kind":"cmp","field":"amount","op":"gt","value":1000000}}' >/dev/null
+CCD=$(curl -s -XPOST $B/compile -H "$J" -d '{"subject":{"userId":"u1"},"resource":{"kind":"voucher-cd","action":"read","rowCtx":["amount"]},"backend":"sql"}')
+chk "条件 Deny → NOT(amount>阈值)" "NOT (amount > \$1)" "$CCD"
+chk "Deny 阈值参数 1000000" "1000000" "$CCD"
+curl -s -XPOST $B/policies -H "$J" -d '{"name":"blk-permit","resourceKind":"voucher-block","action":"read","effect":"permit","constraintTpl":{"kind":"true"}}' >/dev/null
+curl -s -XPOST $B/policies -H "$J" -d '{"name":"blk-denyall","resourceKind":"voucher-block","action":"read","effect":"deny","constraintTpl":{"kind":"true"}}' >/dev/null
+CBLK=$(curl -s -XPOST $B/decide -H "$J" -d '{"subject":{"userId":"u1"},"resource":{"kind":"voucher-block","action":"read"}}')
+chk "Deny 约束=True → 拒全部 deny" '"effect":"deny"' "$CBLK"
+
+echo "== 9. D6 PEP + P0 认证/管理面 =="
+echo "  ⏭  见独立脚本 ./dataauth-auth.sh（须以 DATAAUTH_AUTH_MODE=jwt 起服务；本 off 模式脚本不测认证）"
 
 echo "== 10. L3 物化权限集缓存（空间换时间）=="
 # org 字典树：华东1001→{沪100101,杭100102}；华南2001→{广2002}。

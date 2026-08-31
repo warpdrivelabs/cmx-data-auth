@@ -91,8 +91,33 @@ pub async fn enforce(Json(req): Json<EnforceReq>) -> Result<Json<ApiResp<Value>>
     }))
 }
 
-// ─────────────────── policy CRUD ───────────────────
+/// `DELETE /demo/vouchers/{id}` —— **#4 演示：写/删侧权限无感**。
+///
+/// 与读侧同理，业务 handler 只消费中间件（`pep::guard`，Action::Delete）注入的 `DataScope`，把它拼进
+/// 自己的 DELETE。约定：**scope 参数在前（`$1..$n`），handler 自有参数续号（`$n+1`）**，无需重排占位。
+/// 删除后应校验影响行数——为 0 且 scope≠`TRUE` 即该行不在可见范围，视为越权（403/404）。这里不连真库，只回显。
+pub async fn demo_delete_voucher(
+    Path(id): Path<i64>,
+    axum::Extension(scope): axum::Extension<std::sync::Arc<crate::pep::DataScope>>,
+) -> Result<Json<ApiResp<Value>>> {
+    let n = scope.params.len();
+    let business_sql = format!(
+        "DELETE FROM voucher WHERE ({}) AND id = ${} RETURNING id",
+        scope.where_sql,
+        n + 1
+    );
+    let mut params = scope.params.clone();
+    params.push(json!(id));
+    ok(json!({
+        "note": "写/删同读：消费 DataScope 限定行集（scope 参数在前，自有参数续号）",
+        "effect": scope.effect,
+        "businessSql": business_sql,
+        "params": params,
+        "guard": "影响行数=0 且 scope≠TRUE → 该行不在可见范围，应视为 403/404（防越权删除）",
+    }))
+}
 
+// ─────────────────── policy CRUD ───────────────────
 pub async fn list_policies() -> Result<Json<ApiResp<Value>>> {
     let t = current_tenant();
     let ps = engine::store()
@@ -294,6 +319,23 @@ pub struct PermittedQuery {
     user_id: Option<String>,
     #[serde(default)]
     roles: Option<String>,
+    #[serde(default)]
+    orgs: Option<String>,
+    #[serde(default)]
+    posts: Option<String>,
+}
+
+/// 逗号分隔字符串 → 去空去空白的字符串列表。
+fn csv(s: &Option<String>) -> Vec<String> {
+    match s {
+        Some(v) => v
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 pub async fn dict_permitted(
@@ -303,15 +345,12 @@ pub async fn dict_permitted(
     let t = current_tenant();
     let user = q.user_id.clone().or_else(current_user).unwrap_or_default();
     let roles: Vec<String> = match &q.roles {
-        Some(s) => s
-            .split(',')
-            .map(|x| x.trim())
-            .filter(|x| !x.is_empty())
-            .map(String::from)
-            .collect(),
+        Some(_) => csv(&q.roles),
         None => current_roles(),
     };
-    let p = crate::matcache::permitted_entries(&t, &dict_code, &user, &roles).await?;
+    let orgs = csv(&q.orgs);
+    let posts = csv(&q.posts);
+    let p = crate::matcache::permitted_entries(&t, &dict_code, &user, &roles, &orgs, &posts).await?;
     ok(json!({
         "dictCode": dict_code,
         "fromCache": p.from_cache,

@@ -44,10 +44,35 @@ where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
-        // —— 核心：决策 / 编译 / 就地执行 ——
+        .merge(open_routes::<S>())
+        .merge(admin_routes::<S>())
+        // —— D6 演示：权限无感业务 handler（经 pep::guard 自动注入 DataScope）——
+        .merge(demo_guarded_routes::<S>())
+}
+
+/// 数据面（面向业务调用者，认证后开放）：决策 / 编译 / 内存执行 / 前端查可见字典 / 大盘聚合。
+/// 这些端点**不**挂管理员守卫 —— 业务系统代表终端用户调用。
+fn open_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
         .route("/decide", post(handlers::decide))
         .route("/compile", post(handlers::compile))
         .route("/enforce", post(handlers::enforce))
+        // L3 物化缓存：前端查自身可见字典条目。
+        .route("/dict/{dict_code}/permitted", get(handlers::dict_permitted))
+        // 大盘聚合（计数，低敏），供根 / 监控页轮询。
+        .route("/stats", get(handlers::stats))
+}
+
+/// 管理面（策略/授权/脱敏/维度/关系元组 CRUD + 审计 + 缓存刷新）：整组挂 `require_admin` 守卫。
+/// off 模式放行（本地信任）；jwt/api-key 模式要求管理员角色，否则 403。
+fn admin_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
         // —— 策略 CRUD ——
         .route(
             "/policies",
@@ -68,10 +93,7 @@ where
             "/relation-tuples",
             get(handlers::list_tuples).post(handlers::save_tuple),
         )
-        .route(
-            "/relation-tuples/lookup",
-            get(handlers::lookup_resources),
-        )
+        .route("/relation-tuples/lookup", get(handlers::lookup_resources))
         .route(
             "/relation-tuples/{id}",
             axum::routing::delete(handlers::delete_tuple),
@@ -91,30 +113,40 @@ where
             get(handlers::list_dimension_values),
         )
         .route("/dimension-values", post(handlers::save_dimension_value))
-        // —— L3 物化权限集缓存：前端查字典直取 + 再分配刷新 ——
-        .route("/dict/{dict_code}/permitted", get(handlers::dict_permitted))
+        // —— L3 物化缓存失效（权限再分配后刷新）——
         .route("/dict/{dict_code}/refresh", post(handlers::dict_refresh))
-        // —— 审计 / 大盘 ——
+        // —— 审计（谁访问了什么，敏感）——
         .route("/audit-logs", get(handlers::list_audit))
-        .route("/stats", get(handlers::stats))
-        // —— D6 演示：权限无感业务 handler（经 pep::guard 自动注入 DataScope）——
-        .merge(demo_guarded_routes::<S>())
+        .layer(axum::middleware::from_fn(crate::auth::require_admin))
 }
 
-/// D6 演示路由：`GET /demo/vouchers` 挂 PEP 守卫层（voucher/read，org→ou_id，owner/status 可过滤）。
-/// 业务 handler `demo_vouchers` 权限无感，只消费注入的 `DataScope`。
+/// D6 演示路由：`GET /demo/vouchers`（读）与 `DELETE /demo/vouchers/{id}`（删）各挂 PEP 守卫层
+/// （voucher，org→ou_id，owner/status 可过滤）。业务 handler 权限无感，只消费注入的 `DataScope`。
 fn demo_guarded_routes<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
     use cmx_dataauth_core::Action;
-    let spec = pep::ResourceSpec::new("voucher", Action::Read)
+    let read_spec = pep::ResourceSpec::new("voucher", Action::Read)
         .dim("org", "ou_id")
         .cols(&["owner", "status"]);
-    Router::new().route("/demo/vouchers", get(handlers::demo_vouchers)).layer(
-        axum::middleware::from_fn(move |req, next| {
-            let spec = spec.clone();
+    let del_spec = pep::ResourceSpec::new("voucher", Action::Delete)
+        .dim("org", "ou_id")
+        .cols(&["owner", "status"]);
+    let read = Router::new()
+        .route("/demo/vouchers", get(handlers::demo_vouchers))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let spec = read_spec.clone();
             async move { pep::guard(spec, req, next).await }
-        }),
-    )
+        }));
+    let del = Router::new()
+        .route(
+            "/demo/vouchers/{id}",
+            axum::routing::delete(handlers::demo_delete_voucher),
+        )
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let spec = del_spec.clone();
+            async move { pep::guard(spec, req, next).await }
+        }));
+    read.merge(del)
 }

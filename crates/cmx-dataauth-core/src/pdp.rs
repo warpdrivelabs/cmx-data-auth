@@ -47,34 +47,46 @@ pub fn compose(
     }
 
     let action = resource.action.as_str();
-    let mut per_policy: Vec<Constraint> = Vec::new();
+    let mut permits: Vec<Constraint> = Vec::new();
+    let mut denies: Vec<Constraint> = Vec::new();
 
+    // 按 priority 降序遍历（store 已如此排序）；顺序被保留进 OR/AND，故编译产物确定、高优先条件在前。
     for p in policies {
         if p.resource_kind != resource.kind || p.action.as_str() != action {
             continue;
         }
-        if p.effect == Effect::Deny {
-            trace.matched_policies.push(format!("{}#deny", p.name));
-            trace
-                .notes
-                .push(format!("命中 Deny 策略「{}」→ 拒绝", p.name));
-            return Decision::deny_with(trace);
-        }
-        trace.matched_policies.push(p.name.clone());
         let related: Vec<&Grant> = grants
             .iter()
             .filter(|g| g.policy_id == p.id && subject_hit(subject, g))
             .collect();
-        per_policy.push(instantiate(&p.constraint_tpl, &related, subject, expanded));
+        let c = instantiate(&p.constraint_tpl, &related, subject, expanded);
+        if p.effect == Effect::Deny {
+            // Deny 约束描述"被拒行集"：True=拒全部、False=不拒、谓词=拒该子集。
+            trace.matched_policies.push(format!("{}#deny", p.name));
+            denies.push(c);
+        } else {
+            trace.matched_policies.push(p.name.clone());
+            permits.push(c);
+        }
     }
 
-    if per_policy.is_empty() {
-        trace.notes.push("无匹配策略 → 拒绝".into());
+    // 无放行策略 → 拒绝（Deny 策略只裁减可见集，不单独授予可见性）。
+    if permits.is_empty() {
+        trace.notes.push("无放行策略 → 拒绝".into());
         return Decision::deny_with(trace);
     }
 
-    // 多策略取并（任一放行即可见）。
-    let constraint = Constraint::or(per_policy);
+    // 多放行取并；再扣除 Deny 行集：最终 = OR(permit) AND NOT(OR(deny))。
+    let permit = Constraint::or(permits);
+    let constraint = if denies.is_empty() {
+        permit
+    } else {
+        let deny = Constraint::or(denies);
+        if !matches!(deny, Constraint::False) {
+            trace.notes.push("命中 Deny 策略 → 从可见集扣除其行集".into());
+        }
+        Constraint::and(vec![permit, Constraint::not(deny)])
+    };
     let effect = match constraint {
         Constraint::True => DecisionEffect::Permit,
         Constraint::False => DecisionEffect::Deny,
@@ -97,7 +109,9 @@ pub fn subject_hit(subject: &Subject, g: &Grant) -> bool {
     match g.subject_type.to_uppercase().as_str() {
         "USER" => g.subject_id == subject.user_id,
         "ROLE" => subject.roles.iter().any(|r| r == &g.subject_id),
-        _ => false, // ORG/POST：M1 暂不支持。
+        "ORG" => subject.orgs.iter().any(|o| o == &g.subject_id),
+        "POST" => subject.posts.iter().any(|p| p == &g.subject_id),
+        _ => false,
     }
 }
 
@@ -176,10 +190,15 @@ fn expand_for(key: &str, related: &[&Grant], expanded: &ExpandedDims) -> Vec<Val
         }
         for root in &g.dim_values {
             let root_s = value_to_string(root);
-            let vals = expanded
-                .get(&(key.to_string(), root_s.clone()))
-                .cloned()
-                .unwrap_or_else(|| vec![Value::String(root_s.clone())]);
+            // inherit=true → 用预展开的下行闭包（含子孙）；inherit=false → 只授本节点，不下钻。
+            let vals = if g.inherit {
+                expanded
+                    .get(&(key.to_string(), root_s.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| vec![Value::String(root_s.clone())])
+            } else {
+                vec![Value::String(root_s.clone())]
+            };
             for v in vals {
                 let s = value_to_string(&v);
                 if seen.insert(s.clone()) {

@@ -59,12 +59,41 @@ DATAAUTH_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/fico SERVER__PORT=80
 配置见 `data-auth-server.toml.example`。环境变量前缀 `DATAAUTH_`（`DATAAUTH_AUTH_MODE=off|jwt`、
 `DATAAUTH_TENANCY=single|multi`、`DATAAUTH_PG_URL`…）；框架级端口走 `SERVER__PORT`。
 
+### 安全（P0 加固）
+
+- **认证模式**：`off`（默认，本地信任、含管理面放行，仅供开发）| `jwt`（HS256，**必须携带 `exp` 且校验过期**，
+  拒绝默认/空密钥 `change-me`）| API Key。**生产禁 `off`**（off 模式启动会打印醒目告警）。
+- **管理面鉴权**：策略/授权/脱敏/维度/关系元组的 CRUD + 审计属**管理面**，jwt/api-key 模式下要求管理员角色
+  （`DATAAUTH_ADMIN_ROLES`，默认 `superadmin,admin,dataauth-admin`），否则 403；数据面（`/decide` `/compile`
+  `/enforce` `/dict/*/permitted` `/stats`）对认证后调用者开放。管理员角色 ⊋ 决策超管：`dataauth-admin` 可管配置，
+  但不会让 `decide` 短路成"看全部数据"。
+- **租户白名单**：`DATAAUTH_ALLOWED_TENANTS`（可选，逗号分隔）—— 配置后 JWT `tenant` claim 不在集内即 401。
+- **层级继承**：`grant.inherit=false` 只授本节点、不下钻子孙（此前被忽略，现已生效）。
+
+### 认证/管理面冒烟
+
+```bash
+# jwt 模式起服务后跑（覆盖 P0 #1/#2/#4）
+DATAAUTH_AUTH_MODE=jwt DATAAUTH_JWT_SECRET=test-secret ./dataauth-auth.sh
+```
+
+### 决策模型语义
+
+- **主体类型**：`grant.subject_type` ∈ `USER` | `ROLE` | `ORG` | `POST`。`Subject` 携带 `user_id` / `roles` /
+  `orgs` / `posts`；ORG/POST 做精确匹配（层级由 IAM 展开后传入）。`GET /dict/{code}/permitted` 支持 `?orgs=&posts=`。
+- **策略组合（集合式）**：`permit` 策略的约束描述**可见行集**（多放行取并）；`deny` 策略的约束描述**被拒行集**
+  （`True`=拒全部、`False`=不拒、谓词=拒该子集）。最终可见 = `OR(permit) AND NOT(OR(deny))`。**无放行策略 → 拒绝**。
+- **priority**：只决定求值/编译顺序（高优先条件在生成 SQL 中靠前）与 trace 可读性，**不做覆盖裁决**；需要"高优先直接拒绝"
+  用一条 `deny` 策略（约束 `True`）表达。
+- **层级继承**：`grant.inherit=true`（默认）授本节点 + 全部子孙；`false` 只授本节点。
+
 ## 核心端点（`/api/dataauth/v1/*`）
 
 - `POST /decide` — `{subject, resource}` → `Decision{effect, constraint, obligations, trace}`
 - `POST /compile` — `{subject, resource, backend}` → decide + 编译（`backend` ∈ `sql`|`es`|`rowfilter`）
 - `POST /enforce` — `{subject, resource, rows}` → decide + **内存过滤 rows + 列脱敏**（archetype-③，不碰 DB）
 - `GET /demo/vouchers` — **D6 演示**：权限无感业务 handler，经 `pep::guard` 自动注入 `DataScope`
+- `DELETE /demo/vouchers/{id}` — **写/删侧演示**（Action::Delete）：把 `DataScope` 拼进 DELETE（scope 参数在前、自有参数续号）
 - `GET /dict/{dictCode}/permitted[?userId=&roles=]` — **L3 物化缓存**：直取主体在该字典的可见条目
 - `POST /dict/{dictCode}/refresh` — 失效该字典物化缓存（body 可选 `{subjectType, subjectId}` 精准失效）
 - CRUD：`/policies`（`source` ∈ `inline`|`decisionTable`）`/grants` `/relation-tuples`（+ `/lookup`）`/mask-rules` `/dimension-values`
@@ -103,10 +132,12 @@ POST /compile { ..., backend:"sql" }
 
 ## 验证状态
 
-- `cargo build --workspace` ✓（403 crates，离线 aliyun 镜像）
-- `cargo test --workspace` ✓ 39 单测（1 ignored = pep.rs 文档示例）
+- `cargo build --workspace` ✓（离线 aliyun 镜像）
+- `cargo test --workspace` ✓ 43 单测（1 ignored；含 inherit=false / 条件 Deny / Deny-all / ORG 主体回归）
 - `cargo clippy --workspace` ✓ 0 警告
-- 真机启动 + `dataauth.sh` 端到端 ✓ 19/19（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC / enforce 内存过滤+脱敏 / D3 决策表源 / D6 PEP 注入 / L3 物化缓存）
+- 真机启动 + `dataauth.sh` 端到端 ✓ 26/26（维度展开 / SQL+ES 编译 / Deny / 脱敏三态 / ReBAC / enforce 内存过滤+脱敏 /
+  D3 决策表源 / L3 物化缓存 / **inherit=false 只授本节点** / **ORG 主体子树** / **条件 Deny 扣除行集**）
+- 认证/管理面 `dataauth-auth.sh`（jwt 模式）✓ 10/10（**#1 管理面 403/200 · #2 exp/密钥/无令牌 401 · #4 删侧 scoped DELETE + 无权 403**）
 
 ## 非目标（后续）
 

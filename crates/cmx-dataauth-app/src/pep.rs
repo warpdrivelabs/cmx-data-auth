@@ -58,6 +58,10 @@ impl ResourceSpec {
 }
 
 /// 中间件注入进请求扩展的数据权限切面。业务 handler 经 `Extension<DataScope>` 取用。
+///
+/// 读侧：`SELECT … WHERE {where_sql} …`。写/删侧（Action::Write/Delete）：把 `where_sql` 拼进
+/// `UPDATE/DELETE … WHERE ({where_sql}) AND <自有条件>`，约定 **scope 参数在前（`$1..$n`）、handler
+/// 自有参数续号（`$n+1`）**，无需重排占位；执行后校验影响行数（为 0 且 `where_sql != "TRUE"` = 越权）。
 #[derive(Clone, Debug)]
 pub struct DataScope {
     /// `permit` | `permitWithConstraint`（Deny 已被中间件 403 短路，不会到 handler）。
@@ -83,6 +87,8 @@ fn current_subject() -> Subject {
         tenant: current_tenant(),
         user_id: current_user().unwrap_or_default(),
         roles: current_roles(),
+        orgs: Vec::new(),
+        posts: Vec::new(),
         dims: BTreeMap::new(),
         attrs: Value::Null,
     }

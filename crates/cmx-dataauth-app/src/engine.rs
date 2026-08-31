@@ -58,10 +58,16 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
         .map(|p| crate::policy_source::resolve_policy(p, subject))
         .collect();
 
-    // ② 装命中主体（USER + 每个 ROLE）的授权。
+    // ② 装命中主体（USER + 每个 ROLE + 每个 ORG/POST）的授权。
     let mut subjects = vec![("USER".to_string(), subject.user_id.clone())];
     for r in &subject.roles {
         subjects.push(("ROLE".to_string(), r.clone()));
+    }
+    for o in &subject.orgs {
+        subjects.push(("ORG".to_string(), o.clone()));
+    }
+    for p in &subject.posts {
+        subjects.push(("POST".to_string(), p.clone()));
     }
     let grants = st
         .load_grants(&tenant, &subjects)
@@ -72,6 +78,10 @@ pub async fn decide(subject: &Subject, resource: &Resource) -> Result<Decision, 
     let ex = expander();
     let mut expanded: ExpandedDims = BTreeMap::new();
     for g in &grants {
+        // inherit=false 的授权只覆盖本节点，无需展开子孙（core::pdp 会按 inherit 只取根值）。
+        if !g.inherit {
+            continue;
+        }
         let Some(dim_key) = &g.dim_key else { continue };
         for root in &g.dim_values {
             let root_s = match root {

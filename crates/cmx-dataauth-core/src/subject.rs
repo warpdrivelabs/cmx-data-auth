@@ -36,6 +36,12 @@ pub struct Subject {
     pub user_id: String,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// 主体所属组织（`ORG` 主体授权匹配）。层级由 IAM 展开后传入（如含上级组织），核内只做精确匹配。
+    #[serde(default)]
+    pub orgs: Vec<String>,
+    /// 主体所属岗位（`POST` 主体授权匹配）。
+    #[serde(default)]
+    pub posts: Vec<String>,
     /// 主体在各维度上被授予的**根值集**（如 `org -> ["1001","1002"]`）。层级展开在 app 层完成。
     #[serde(default)]
     pub dims: BTreeMap<String, Vec<Value>>,

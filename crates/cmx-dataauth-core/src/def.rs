@@ -44,8 +44,13 @@ pub struct PolicyDef {
     /// `{"kind":"in","field":"ou_id","values":["$dim:org"]}` 与标量占位 `"$user"`）。
     /// `source=decisionTable`：决策表 DecisionBody JSON。均落 `constraint_json` 列。
     pub constraint_tpl: Value,
+    /// 求值顺序权重（越大越先）。策略组合是**集合式**（放行取并、再扣除 Deny 行集），故 priority
+    /// **不做覆盖裁决**——它只决定遍历/编译顺序（高优先条件在生成 SQL 中靠前）与 trace 可读性。
+    /// 需要"高优先直接拒绝"时，用一条 Deny 策略（其约束 = 被拒行集，`True`=拒全部）表达。
     #[serde(default)]
     pub priority: i32,
+    /// `permit`：约束描述**可见行集**（多放行取并）。`deny`：约束描述**被拒行集**
+    /// （`True`=拒全部、`False`=不拒、谓词=拒该子集），最终可见 = 放行 AND NOT(拒绝并)。
     #[serde(default)]
     pub effect: Effect,
 }
