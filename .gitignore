@@ -17,3 +17,6 @@
 *.jsonback
 *.bak
 **/.DS_Store
+
+# 本地真实连接配置（含明文数据库密码；不入库）
+data-auth-server.toml
