@@ -20,3 +20,7 @@
 
 # 本地真实连接配置（含明文数据库密码；不入库）
 data-auth-server.toml
+
+# docker 本地构建凭据与运行时挂载（不入库；模板见 docker/.env.example）
+/docker/.env
+/docker/runtime/

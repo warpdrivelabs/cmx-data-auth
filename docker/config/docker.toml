@@ -1,0 +1,22 @@
+# cmx-dataauth-server 容器配置模板（挂载覆盖 /app/config；数据库为占位地址）
+# 宿主侧服务用 host.docker.internal（docker run 需 --add-host=...:host-gateway）。
+
+[server]
+host = "0.0.0.0"
+port = 8098
+log_dir = "logs"
+log_level = "info"
+
+# off（默认，本地信任、含管理面放行，仅供开发）| jwt。生产禁 off。
+[auth]
+mode = "off"
+# jwt 模式：令牌必须携带 exp 且被校验；拒绝默认/空密钥（须改此值）。
+# jwt_secret = "change-me"
+# jwt_tenant_claim = "tenant"
+# jwt_roles_claim = "roles"
+# api_keys = "key1:tenantA,key2:tenantB"
+# single（默认）| multi（每租户一库 dataauth_<tenant>）
+tenancy = "single"
+
+[datasource]
+dataauth_pg_url = "postgres://postgres:postgres@host.docker.internal:5432/fico"
