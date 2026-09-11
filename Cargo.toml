@@ -33,6 +33,8 @@ cmx-core = { path = "../cmx-container/crates/libs/cmx-core", version = "0.1.12" 
 cmx-web-chassis = { path = "../cmx-container/crates/libs/cmx-web-chassis", version = "0.1.12" }
 cmx-web-monitor = { path = "../cmx-container/crates/libs/cmx-web-monitor", version = "0.1.12" }
 cmx-service-base = { path = "../cmx-container/crates/libs/cmx-service-base", version = "0.1.12", default-features = false }
+# 应用层横切：ConfigManager（toml [auth] 段直读，env AUTH__* 覆盖）——auth/tenancy 配置源
+cmx-utils = { path = "../cmx-container/crates/libs/cmx-utils", version = "0.1.12" }
 
 # —— 复用 cmx-rulesengine 的 FEEL 引擎 + 决策表内核（D3：决策表作策略源）——
 cmx-rule-feel = { path = "../cmx-rulesengine/crates/cmx-rule-feel", version = "0.1.0" }

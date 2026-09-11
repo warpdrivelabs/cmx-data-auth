@@ -12,6 +12,7 @@ cmx-database-pg.workspace = true
 cmx-core.workspace = true
 cmx-web-monitor.workspace = true
 cmx-service-base.workspace = true
+cmx-utils.workspace = true
 cmx-rule-feel.workspace = true
 cmx-rule-model.workspace = true
 cmx-rule-engine.workspace = true

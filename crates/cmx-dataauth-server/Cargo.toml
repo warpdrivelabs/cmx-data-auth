@@ -14,11 +14,9 @@ cmx-dataauth-app.workspace = true
 cmx-web-chassis.workspace = true
 cmx-web-monitor.workspace = true
 cmx-database-pg.workspace = true
-cmx-service-base = { workspace = true, features = ["config-manager"] }
+cmx-service-base = { workspace = true, features = ["config-manager", "registry-config"] }
 axum.workspace = true
 tokio.workspace = true
 dotenvy.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-toml.workspace = true
-serde.workspace = true

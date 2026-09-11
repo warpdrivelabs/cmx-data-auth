@@ -1,6 +1,8 @@
 //! 多租户：db-per-tenant 物理隔离（镜像 cmx-rule-app::tenancy）。
 //!
-//! 模式由 `DATAAUTH_TENANCY` 决定：`single`（默认，零回归）| `multi`（每租户一库 `dataauth_<tenant>`）。
+//! 模式由配置 `auth.tenancy` 决定（toml `[auth]` 段 ← env `AUTH__TENANCY` 覆盖）：
+//! `single`（默认，零回归）| `multi`（每租户一库 `dataauth_<tenant>`）。multi 下每租户库 URL 由 env
+//! `DATAAUTH_TENANT_DB_URL_TEMPLATE` 的 `{tenant}` 占位派生（业务专属，保持 env-only）。
 
 use cmx_database_pg::{DbConfig, DbType};
 use std::collections::HashSet;
@@ -9,8 +11,13 @@ use std::sync::{Mutex, OnceLock};
 /// 默认租户库 db_id（single 模式 / 无租户 scope）。
 pub const DATAAUTH_DB_ID: &str = "dataauth_pg";
 
+/// 租户模式（配置 `auth.tenancy`，ConfigManager 直读；默认 single）。
 fn mode() -> String {
-    std::env::var("DATAAUTH_TENANCY").unwrap_or_else(|_| "single".to_string())
+    cmx_utils::ConfigManager::try_global()
+        .and_then(|cm| cm.get_string("auth.tenancy").ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "single".to_string())
 }
 
 /// 是否多租户模式。

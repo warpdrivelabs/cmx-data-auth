@@ -1,11 +1,21 @@
 # cmx-dataauth-server 本地启动配置示例。复制为 data-auth-server.toml（勿提交含密钥的真实配置）。
-# 框架级字段（host/port/log）走 [server] 段（chassis 读）；业务字段走 [auth]/[datasource]（本 bin 读）。
+# 统一启动契约：dataauth.sh export CONFIG_FILE 指向本文件；chassis 读 [server]、ConfigManager 读
+# [[databases]]/[auth]（env SERVER__* / AUTH__* 覆盖）。
 
 [server]
 host = "0.0.0.0"
 port = 8098
 log_dir = "logs"
 log_level = "info"
+graceful_timeout_secs = 10
+
+# —— 数据源（标准 [[databases]] 段；db_id 须为 "dataauth_pg"，缺段启动失败）——
+[[databases]]
+db_id = "dataauth_pg"
+db_name = "数据权限库"
+db_type = "postgres"
+db_url = "postgres://postgres:postgres@127.0.0.1:5432/fico"
+default = true
 
 [auth]
 # off（默认，本地信任、含管理面放行，仅供开发）| jwt。生产禁 off。
@@ -17,9 +27,12 @@ mode = "off"
 # api_keys = "key1:tenantA,key2:tenantB"
 # single（默认）| multi（每租户一库 dataauth_<tenant>）
 tenancy = "single"
-# 以下两项仅经环境变量配置（env-only）：
-#   DATAAUTH_ADMIN_ROLES      管理面所需角色（默认 superadmin,admin,dataauth-admin）
-#   DATAAUTH_ALLOWED_TENANTS  JWT tenant claim 白名单（空=不限制）
+# 管理面所需角色（默认 superadmin,admin,dataauth-admin）
+admin_roles = "superadmin,admin,dataauth-admin"
+# JWT tenant claim 白名单（空/省略 = 不限制）
+# allowed_tenants = "tenantA,tenantB"
 
-[datasource]
-dataauth_pg_url = "postgres://postgres:postgres@127.0.0.1:5432/fico"
+# 业务专属旋钮仅经环境变量（env-only）：
+#   DATAAUTH_DECIDE_CACHE_TTL_SECS   decide 缓存 TTL（默认 0=关）
+#   DATAAUTH_DESC_CACHE_TTL_SECS     维度展开缓存 TTL（默认 60）
+#   DATAAUTH_TENANT_DB_URL_TEMPLATE  multi 模式每租户库 URL 模板（{tenant} 占位）

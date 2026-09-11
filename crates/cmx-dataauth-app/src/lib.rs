@@ -17,7 +17,7 @@ pub mod resp;
 pub mod tenancy;
 pub mod tenant;
 
-pub use auth::auth as auth_middleware;
+pub use auth::{auth as auth_middleware, auth_config_warmup};
 pub use engine::{warm_store, DATAAUTH_DB_ID};
 pub use pep::{guard as pep_guard, DataScope, ResourceSpec};
 pub use resp::{ApiResp, AuthzError, Result};

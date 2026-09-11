@@ -1,0 +1,22 @@
+# cmx-dataauth-server dev 配置（连远程开发库；与主 data-auth-server.toml 仅 [[databases]].db_url 不同）。
+# 用法：CONFIG_FILE=data-auth-server-dev.toml ./dataauth.sh
+# 注：db_url 为模板，按你的 dev 库实际地址/库名调整；schema 首启由 warm_store 自动建。
+
+[server]
+host = "0.0.0.0"
+port = 8098
+log_dir = "logs"
+log_level = "info"
+graceful_timeout_secs = 10
+
+[[databases]]
+db_id = "dataauth_pg"
+db_name = "数据权限库(dev)"
+db_type = "postgres"
+db_url = "postgres://dbuser_dba:dbuser_dba@192.168.1.14:5432/cmx_fico"
+default = true
+
+[auth]
+mode = "off"
+tenancy = "single"
+admin_roles = "superadmin,admin,dataauth-admin"

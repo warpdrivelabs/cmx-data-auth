@@ -1,8 +1,11 @@
 //! 认证中间件（off / jwt / api-key），建租户 scope。镜像 cmx-rule-app::auth。
 //!
-//! - `DATAAUTH_AUTH_MODE=off`（默认）：不校验，建 `default` 租户 scope 放行 —— 单租户零回归。
-//! - `DATAAUTH_AUTH_MODE=jwt`：验 Bearer JWT（HS256），解 tenant/user/roles claim；缺/坏 → 401。
-//! - API Key（`DATAAUTH_API_KEYS=key:tenant,...`）：`X-API-Key` 命中 → 服务身份，租户取 key 绑定。
+//! 配置经全局 `ConfigManager` 读 `[auth]` 段（toml ← env `AUTH__*` 覆盖，`__`→`.` 约定）：
+//! - `auth.mode=off`（默认）：不校验，建 `default` 租户 scope 放行 —— 单租户零回归。
+//! - `auth.mode=jwt`：验 Bearer JWT（HS256），解 tenant/user/roles claim；缺/坏 → 401。
+//! - API Key（`auth.api_keys=key:tenant,...`）：`X-API-Key` 命中 → 服务身份，租户取 key 绑定。
+//!
+//! 启动期 [`auth_config_warmup`] 对 `auth.mode` fail-fast（缺失/非法即中止），由 server datasources 钩子调用。
 
 use crate::tenant::{scope, TenantCtx};
 use axum::extract::Request;
@@ -11,7 +14,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-/// 认证配置（懒读环境变量）。
+/// 认证配置（每请求从 ConfigManager 读 `auth.*`）。
 struct AuthConfig {
     mode: String,
     jwt_secret: String,
@@ -23,9 +26,24 @@ struct AuthConfig {
 }
 
 impl AuthConfig {
-    fn from_env() -> Self {
-        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
-        let api_keys = env("DATAAUTH_API_KEYS", "")
+    /// 从全局 ConfigManager 读 `[auth]` 段（env `AUTH__*` 覆盖）。默认值与迁移前 env 版逐一对齐。
+    fn from_config() -> Self {
+        let get = |key: &str| {
+            cmx_utils::ConfigManager::try_global()
+                .and_then(|cm| cm.get_string(key).ok())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let csv = |key: &str, default: &str| -> Vec<String> {
+            get(key)
+                .unwrap_or_else(|| default.to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let api_keys = get("auth.api_keys")
+            .unwrap_or_default()
             .split(',')
             .filter(|s| !s.trim().is_empty())
             .filter_map(|pair| {
@@ -33,25 +51,33 @@ impl AuthConfig {
                 Some((k.trim().to_string(), t.trim().to_string()))
             })
             .collect();
-        let allowed_tenants = env("DATAAUTH_ALLOWED_TENANTS", "")
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let admin_roles = env("DATAAUTH_ADMIN_ROLES", "superadmin,admin,dataauth-admin")
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
         Self {
-            mode: env("DATAAUTH_AUTH_MODE", "off"),
-            jwt_secret: env("DATAAUTH_JWT_SECRET", "change-me"),
-            tenant_claim: env("DATAAUTH_JWT_TENANT_CLAIM", "tenant"),
-            roles_claim: env("DATAAUTH_JWT_ROLES_CLAIM", "roles"),
+            mode: get("auth.mode").unwrap_or_else(|| "off".to_string()),
+            jwt_secret: get("auth.jwt_secret").unwrap_or_else(|| "change-me".to_string()),
+            tenant_claim: get("auth.jwt_tenant_claim").unwrap_or_else(|| "tenant".to_string()),
+            roles_claim: get("auth.jwt_roles_claim").unwrap_or_else(|| "roles".to_string()),
             api_keys,
-            allowed_tenants,
-            admin_roles,
+            allowed_tenants: csv("auth.allowed_tenants", ""),
+            admin_roles: csv("auth.admin_roles", "superadmin,admin,dataauth-admin"),
         }
+    }
+}
+
+/// 启动期认证配置预热（fail-fast）：校验 `auth.mode` ∈ {off,jwt}，缺失/非法即 panic 中止启动
+/// （仿 engine-kit `auth_config_warmup`；缺失通常意味 CONFIG_FILE 未指向 data-auth-server.toml）。
+/// 由 server 的 datasources 钩子在建池前调用。
+pub fn auth_config_warmup() {
+    let raw = cmx_utils::ConfigManager::try_global()
+        .and_then(|cm| cm.get_string("auth.mode").ok())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    match raw.as_deref() {
+        Some("off") => warn_off_once(),
+        Some("jwt") => tracing::info!("✅ 数据权限认证模式 = jwt"),
+        other => panic!(
+            "auth.mode 配置缺失或非法（当前值: {other:?}），须为 off | jwt——\
+             检查 [auth] mode（或 env AUTH__MODE）、及 CONFIG_FILE 是否指向 data-auth-server.toml"
+        ),
     }
 }
 
@@ -66,7 +92,7 @@ struct Claims {
 
 /// 认证中间件。建租户 scope + 确保租户库就绪后放行；失败返 401。
 pub async fn auth(req: Request, next: Next) -> Response {
-    let cfg = AuthConfig::from_env();
+    let cfg = AuthConfig::from_config();
 
     if cfg.mode == "off" {
         warn_off_once();
@@ -155,13 +181,13 @@ fn unauthorized(msg: &str) -> Response {
 /// 管理面守卫：保护策略/授权/脱敏/维度/关系元组的写读端点（"谁能治理治理者"）。
 ///
 /// - `off` 模式：本地信任，放行（含 CRUD）—— 保持零回归，生产须禁 off。
-/// - `jwt`/`api-key` 模式：要求主体持有管理员角色（`DATAAUTH_ADMIN_ROLES`，默认
+/// - `jwt`/`api-key` 模式：要求主体持有管理员角色（`auth.admin_roles`，默认
 ///   `superadmin,admin,dataauth-admin`），否则 403。数据面端点（decide/compile/enforce）不挂本守卫。
 ///
 /// 注意：管理员角色 ⊇ 决策超管（[`cmx_dataauth_core::SUPERADMIN_ROLES`]）但不等价 —— `dataauth-admin`
 /// 可管理配置，却不会让 `decide` 短路成"看全部数据"。
 pub async fn require_admin(req: Request, next: Next) -> Response {
-    let cfg = AuthConfig::from_env();
+    let cfg = AuthConfig::from_config();
     if cfg.mode == "off" {
         return next.run(req).await;
     }

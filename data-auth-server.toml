@@ -1,0 +1,35 @@
+# cmx-dataauth-server 实际配置（独立数据权限引擎微服务模式，形态与 rules-server.toml 对齐）。
+#
+# 统一启动契约：dataauth.sh 会 export CONFIG_FILE 指向本文件，chassis 读 [server]、ConfigManager
+# 读 [[databases]]/[auth]（env SERVER__* / AUTH__* 覆盖）。业务专属旋钮仍走 DATAAUTH_* env
+# （DATAAUTH_DECIDE_CACHE_TTL_SECS / DATAAUTH_DESC_CACHE_TTL_SECS / DATAAUTH_TENANT_DB_URL_TEMPLATE）。
+
+[server]
+host = "0.0.0.0"
+port = 8098
+log_dir = "logs"
+log_level = "info"
+graceful_timeout_secs = 10
+
+# —— 数据源（标准 [[databases]] 段；db_id = 引擎常量 DATAAUTH_DB_ID = "dataauth_pg"，缺段启动失败）——
+[[databases]]
+db_id = "dataauth_pg"
+db_name = "数据权限库"
+db_type = "postgres"
+db_url = "postgres://postgres:postgres@127.0.0.1:5432/fico"
+default = true
+
+[auth]
+# off（默认，本地信任、含管理面放行，仅供开发）| jwt。生产禁 off。
+mode = "off"
+# jwt 模式：令牌须携带 exp 且被校验；拒绝默认/空密钥（须改 jwt_secret）。
+# jwt_secret = "change-me"
+# jwt_tenant_claim = "tenant"
+# jwt_roles_claim = "roles"
+# api_keys = "key1:tenantA,key2:tenantB"
+# single（默认）| multi（每租户一库 dataauth_<tenant>）
+tenancy = "single"
+# 管理面所需角色（管理面 CRUD 守卫；默认 superadmin,admin,dataauth-admin）
+admin_roles = "superadmin,admin,dataauth-admin"
+# JWT tenant claim 白名单（空/省略 = 不限制）
+# allowed_tenants = "tenantA,tenantB"
