@@ -18,5 +18,8 @@ default = true
 
 [auth]
 mode = "off"
+# 接受门户反代注入的 M2M API Key（portal 的 outgoing_api_key）。engine-kit 收到 X-Api-Key 即强校验，
+# 未登记则 401「无效 API Key」→ 前端误判登录失效踢回登录页。与 model/mdm/flow/report 保持一致。
+api_keys = "cmx_sk_dev_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 tenancy = "single"
 admin_roles = "superadmin,admin,dataauth-admin"
