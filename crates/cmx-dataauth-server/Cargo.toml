@@ -20,3 +20,7 @@ tokio.workspace = true
 dotenvy.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+# 路由契约守护测试：oneshot 探测挂载路径（仅测试编译，不进运行时依赖）
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

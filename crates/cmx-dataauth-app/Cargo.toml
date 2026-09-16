@@ -13,6 +13,8 @@ cmx-core.workspace = true
 cmx-web-monitor.workspace = true
 cmx-service-base.workspace = true
 cmx-utils.workspace = true
+# 路由装配契约（module.rs 适配器接入 ModuleRoutes<S>；轻依赖）
+cmx-engine-kit.workspace = true
 cmx-rule-feel.workspace = true
 cmx-rule-model.workspace = true
 cmx-rule-engine.workspace = true
